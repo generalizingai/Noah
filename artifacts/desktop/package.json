@@ -63,10 +63,7 @@
       }
     ],
     "npmRebuild": true,
-    "buildDependenciesFromSource": false,
     "nodeGypRebuild": false,
-    "electronVersion": "31.0.0",
-    "nativeRebuilder": "legacy",
     "publish": {
       "provider": "github",
       "owner": "generalizingai",
