@@ -99,6 +99,44 @@ function resolveBackendUrl() {
 }
 const NOAH_BACKEND_URL = resolveBackendUrl();
 
+// ─── Local file server (production only) ──────────────────────────────────────
+// Firebase OAuth requires an http:// origin. In production the app loads from
+// file:// which Firebase rejects. We spin up a tiny localhost server so the
+// renderer has an http://127.0.0.1:PORT origin that Firebase already whitelists.
+let _localServer = null;
+let _localServerUrl = null;
+
+function startLocalFileServer(distDir) {
+  return new Promise((resolve) => {
+    const MIME = {
+      '.html': 'text/html', '.js': 'application/javascript',
+      '.css': 'text/css',   '.png': 'image/png',
+      '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+      '.json': 'application/json', '.woff2': 'font/woff2',
+      '.woff': 'font/woff', '.ttf': 'font/ttf',
+    };
+    _localServer = http.createServer((req, res) => {
+      // strip query string
+      const urlPath = req.url.split('?')[0];
+      let filePath = path.join(distDir, urlPath === '/' ? 'index.html' : urlPath);
+      if (!fs.existsSync(filePath)) filePath = path.join(distDir, 'index.html');
+      try {
+        const data = fs.readFileSync(filePath);
+        const ext  = path.extname(filePath).toLowerCase();
+        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+        res.end(data);
+      } catch {
+        res.writeHead(404); res.end('Not found');
+      }
+    });
+    _localServer.listen(0, '127.0.0.1', () => {
+      // Use 'localhost' in the URL — Firebase whitelists 'localhost' by default
+      _localServerUrl = `http://localhost:${_localServer.address().port}`;
+      resolve(_localServerUrl);
+    });
+  });
+}
+
 let mainWindow = null;
 let floatingBar = null;
 let tray = null;
@@ -135,12 +173,34 @@ function createMainWindow() {
   const isRemoteUI = !VITE_URL.includes('localhost') && !VITE_URL.includes('127.0.0.1');
   if (isDev || isRemoteUI) {
     mainWindow.loadURL(VITE_URL + '/').catch(() => {
-      // Remote or dev URL failed — fall back to the built dist
       mainWindow.loadFile(distMain);
     });
+  } else if (_localServerUrl) {
+    // Production: serve from localhost so Firebase OAuth works (file:// origin is blocked)
+    mainWindow.loadURL(_localServerUrl + '/');
   } else {
     mainWindow.loadFile(distMain);
   }
+
+  // Allow Firebase auth popup windows (Google sign-in)
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (
+      url.includes('accounts.google.com') ||
+      url.includes('firebaseapp.com') ||
+      url.includes('firebase.com')
+    ) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 500, height: 650,
+          webPreferences: { contextIsolation: true, nodeIntegration: false },
+        },
+      };
+    }
+    // Open all other external links in the system browser
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.on('closed', () => { mainWindow = null; });
@@ -176,6 +236,8 @@ function createFloatingBar() {
     floatingBar.loadURL(VITE_URL + '/floating-bar').catch(() => {
       floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
     });
+  } else if (_localServerUrl) {
+    floatingBar.loadURL(_localServerUrl + '/#/floating-bar');
   } else {
     floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
   }
@@ -698,6 +760,13 @@ app.whenReady().then(async () => {
     return ['microphone', 'media', 'audioCapture', 'mediakeysystem'].includes(permission);
   });
 
+  // Start local file server in production so Firebase OAuth works
+  // (file:// origin is blocked by Firebase; http://127.0.0.1 is whitelisted)
+  if (app.isPackaged) {
+    const distDir = path.join(__dirname, '../dist');
+    await startLocalFileServer(distDir);
+  }
+
   createMainWindow();
   createFloatingBar();
   createTray();
@@ -814,4 +883,5 @@ app.on('before-quit', () => {
   if (uIOhook)  { try { uIOhook.stop(); } catch {} }
   globalShortcut.unregisterAll();
   if (tray) tray.destroy();
+  if (_localServer) { try { _localServer.close(); } catch {} }
 });
