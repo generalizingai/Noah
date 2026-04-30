@@ -28,6 +28,9 @@ jobs:
   build-mac:
     name: Build macOS DMG
     runs-on: macos-14    # Apple Silicon runner — fastest native M1 build
+    env:
+      # Evaluate secret presence at job level — can then be used in step if: conditions
+      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
 
     steps:
       # ── 1. Checkout ────────────────────────────────────────────────────────
@@ -63,7 +66,7 @@ jobs:
 
       # ── 5. Import Apple Developer certificate (skipped if no secrets) ───────
       - name: Import certificate
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: env.HAS_CERT == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
