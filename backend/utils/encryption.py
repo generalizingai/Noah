@@ -12,15 +12,26 @@ logger = logging.getLogger(__name__)
 # Load the master secret from environment variables. This must be a securely managed 32-byte key.
 ENCRYPTION_SECRET = os.getenv('ENCRYPTION_SECRET', '').encode('utf-8')
 if not ENCRYPTION_SECRET or len(ENCRYPTION_SECRET) < 32:
-    raise ValueError(
-        "ENCRYPTION_SECRET environment variable not set or is too short. " "It must be a securely managed 32-byte key."
+    logger.warning(
+        "ENCRYPTION_SECRET environment variable not set or is too short. "
+        "Encryption/decryption will fail until this is configured."
     )
+    ENCRYPTION_SECRET = None
+
+
+def _require_encryption_secret():
+    if not ENCRYPTION_SECRET or len(ENCRYPTION_SECRET) < 32:
+        raise ValueError(
+            "ENCRYPTION_SECRET environment variable not set or is too short. "
+            "It must be a securely managed 32-byte key."
+        )
 
 
 def derive_key(uid: str) -> bytes:
     """
     Derives a user-specific 32-byte key from the master secret and user ID (salt).
     """
+    _require_encryption_secret()
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
