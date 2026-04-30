@@ -761,9 +761,14 @@ app.whenReady().then(async () => {
   });
 
   // Start local file server in production so Firebase OAuth works
-  // (file:// origin is blocked by Firebase; http://127.0.0.1 is whitelisted)
+  // (file:// origin is blocked by Firebase; localhost is whitelisted by default)
   if (app.isPackaged) {
-    const distDir = path.join(__dirname, '../dist');
+    // dist/ is listed in asarUnpack so it lives at app.asar.unpacked/dist
+    // — real files on disk that the HTTP server can read without ASAR limitations
+    const appPath = app.getAppPath();
+    const distDir = appPath.endsWith('.asar')
+      ? path.join(appPath + '.unpacked', 'dist')
+      : path.join(appPath, 'dist');
     await startLocalFileServer(distDir);
   }
 
