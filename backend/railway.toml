@@ -3,7 +3,7 @@ dockerfilePath = "Dockerfile.railway"
 
 [deploy]
 startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --loop uvloop"
-healthcheckPath = "/api/v1/hermes/status"
+healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3

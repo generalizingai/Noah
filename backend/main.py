@@ -69,14 +69,26 @@ log_langsmith_status()
 validate_stripe_price_ids()
 
 _firebase_json = os.environ.get('SERVICE_ACCOUNT_JSON') or os.environ.get('FIREBASE_GOOGLE_CREDENTIALS_JSON')
-if _firebase_json:
-    service_account_info = json.loads(_firebase_json)
-    credentials = firebase_admin.credentials.Certificate(service_account_info)
-    firebase_admin.initialize_app(credentials)
-else:
-    firebase_admin.initialize_app()
+try:
+    if _firebase_json:
+        service_account_info = json.loads(_firebase_json)
+        credentials = firebase_admin.credentials.Certificate(service_account_info)
+        firebase_admin.initialize_app(credentials)
+    else:
+        firebase_admin.initialize_app()
+except Exception as _fb_err:
+    logging.getLogger(__name__).warning(
+        "Firebase initialization failed (%s) — auth-dependent endpoints will error. "
+        "Set FIREBASE_GOOGLE_CREDENTIALS_JSON to fix this.", _fb_err
+    )
 
 app = FastAPI()
+
+
+@app.get("/health")
+async def health_check():
+    """Simple liveness probe — always returns 200. Used by Railway health checks."""
+    return {"status": "ok"}
 
 app.include_router(transcribe.router)
 app.include_router(conversations.router)
