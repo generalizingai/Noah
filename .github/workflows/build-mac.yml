@@ -77,11 +77,10 @@ jobs:
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> $GITHUB_ENV
 
-      # ── 6. Build + package ──────────────────────────────────────────────────
-      - name: Build and publish DMG
+      # ── 6. Build DMG (no publish — we create the release manually below) ────
+      - name: Build DMG
         working-directory: artifacts/desktop
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -91,9 +90,29 @@ jobs:
         run: |
           VERSION="${RELEASE_VERSION#noah-v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npm run release
+          npx electron-builder --mac --publish never
 
-      # ── 7. Confirm ─────────────────────────────────────────────────────────
-      - name: List release artifacts
+      # ── 7. Confirm build output ─────────────────────────────────────────────
+      - name: List build artifacts
         working-directory: artifacts/desktop/dist
-        run: ls -lh *.dmg *.zip latest-mac.yml 2>/dev/null || true
+        run: ls -lh
+
+      # ── 8. Create GitHub Release with clean notes and upload assets ─────────
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_VERSION#noah-v}"
+          gh release create "$RELEASE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Noah $VERSION" \
+            --clobber \
+            --notes "## Noah Desktop $VERSION
+
+Download the DMG below and drag Noah to your Applications folder.
+
+> **First launch on macOS:** Right-click the app → Open → Open anyway (required once for unsigned builds)." \
+            artifacts/desktop/dist/*.dmg \
+            artifacts/desktop/dist/*.zip \
+            artifacts/desktop/dist/latest-mac.yml
