@@ -84,6 +84,8 @@ const VITE_URL = resolveUIUrl();
 // Backend URL: env var → ~/.noahrc backendUrl → API server proxy fallback
 // The API server proxy runs alongside the desktop UI and forwards requests
 // to the Python backend (local dev) or a deployed Railway instance.
+const PRODUCTION_BACKEND_URL = 'https://noah-production-0ef2.up.railway.app';
+
 function resolveBackendUrl() {
   if (process.env.NOAH_BACKEND_URL) return process.env.NOAH_BACKEND_URL.replace(/\/$/, '');
   try {
@@ -93,7 +95,7 @@ function resolveBackendUrl() {
       if (cfg.backendUrl) return cfg.backendUrl.replace(/\/$/, '');
     }
   } catch {}
-  return '';  // empty = use VITE_NOAH_BACKEND_URL or localhost:8001 default in renderer
+  return PRODUCTION_BACKEND_URL;
 }
 const NOAH_BACKEND_URL = resolveBackendUrl();
 

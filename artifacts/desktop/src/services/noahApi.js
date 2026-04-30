@@ -10,7 +10,7 @@ import { buildMemoryContext, addMemory } from './memory';
 // The IPC call resolves asynchronously at startup and updates the module-level
 // variable before any real user request is made.
 
-let NOAH_BACKEND_URL = import.meta.env.VITE_NOAH_BACKEND_URL || 'http://localhost:8001';
+let NOAH_BACKEND_URL = import.meta.env.VITE_NOAH_BACKEND_URL || 'https://noah-production-0ef2.up.railway.app';
 
 if (typeof window !== 'undefined' && window.electronAPI?.getBackendUrl) {
   window.electronAPI.getBackendUrl().then(url => {
