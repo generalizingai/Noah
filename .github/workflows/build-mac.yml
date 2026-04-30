@@ -104,15 +104,12 @@ jobs:
           RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${RELEASE_VERSION#noah-v}"
+          NOTES="## Noah Desktop ${VERSION}"$'\n\n'"Download the DMG, open it, and drag Noah to Applications."$'\n\n'"**First launch:** right-click Noah and choose Open (required once for unsigned builds)."
           gh release create "$RELEASE_VERSION" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Noah $VERSION" \
+            --title "Noah ${VERSION}" \
             --clobber \
-            --notes "## Noah Desktop $VERSION
-
-Download the DMG below and drag Noah to your Applications folder.
-
-> **First launch on macOS:** Right-click the app → Open → Open anyway (required once for unsigned builds)." \
+            --notes "$NOTES" \
             artifacts/desktop/dist/*.dmg \
             artifacts/desktop/dist/*.zip \
             artifacts/desktop/dist/latest-mac.yml
