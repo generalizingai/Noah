@@ -5,25 +5,29 @@
 
 const LS_OPENAI        = 'noah_openai_key';
 const LS_DEEPGRAM      = 'noah_deepgram_key';
+const LS_OPENROUTER    = 'noah_openrouter_key';
 const LS_VOICE         = 'noah_voice_model';
 const LS_SYSTEM_PROMPT = 'noah_system_instructions';
 
 // Integration tokens
 const LS_INTEGRATIONS  = 'noah_integrations'; // JSON object
 
-let _openai   = null;
-let _deepgram = null;
-let _loaded   = false;
+let _openai      = null;
+let _deepgram    = null;
+let _openrouter  = null;
+let _loaded      = false;
 
 async function loadKeys() {
   if (_loaded) return;
   _loaded = true;
 
   try {
-    const lsOpenai   = localStorage.getItem(LS_OPENAI)?.trim();
-    const lsDeepgram = localStorage.getItem(LS_DEEPGRAM)?.trim();
-    if (lsOpenai)   _openai   = lsOpenai;
-    if (lsDeepgram) _deepgram = lsDeepgram;
+    const lsOpenai     = localStorage.getItem(LS_OPENAI)?.trim();
+    const lsDeepgram   = localStorage.getItem(LS_DEEPGRAM)?.trim();
+    const lsOpenrouter = localStorage.getItem(LS_OPENROUTER)?.trim();
+    if (lsOpenai)     _openai     = lsOpenai;
+    if (lsDeepgram)   _deepgram   = lsDeepgram;
+    if (lsOpenrouter) _openrouter = lsOpenrouter;
   } catch {}
 
   if (typeof window !== 'undefined' && window.electronAPI?.getApiKeys) {
@@ -36,8 +40,9 @@ async function loadKeys() {
     }
   }
 
-  if (!_openai)   _openai   = import.meta.env.VITE_OPENAI_API_KEY   || '';
-  if (!_deepgram) _deepgram = import.meta.env.VITE_DEEPGRAM_API_KEY || '';
+  if (!_openai)     _openai     = import.meta.env.VITE_OPENAI_API_KEY   || '';
+  if (!_deepgram)   _deepgram   = import.meta.env.VITE_DEEPGRAM_API_KEY || '';
+  if (!_openrouter) _openrouter = import.meta.env.VITE_OPENROUTER_API_KEY || '';
 }
 
 loadKeys();
@@ -70,8 +75,14 @@ export function saveSystemInstructions(text) {
   try { localStorage.setItem(LS_SYSTEM_PROMPT, text); } catch {}
 }
 
-export function hasOpenAIKey()   { return !!getOpenAIKey(); }
-export function hasDeepgramKey() { return !!getDeepgramKey(); }
+export function getOpenRouterKey() {
+  try { const k = localStorage.getItem(LS_OPENROUTER)?.trim(); if (k) return k; } catch {}
+  return _openrouter || import.meta.env.VITE_OPENROUTER_API_KEY || '';
+}
+
+export function hasOpenAIKey()      { return !!getOpenAIKey(); }
+export function hasDeepgramKey()    { return !!getDeepgramKey(); }
+export function hasOpenRouterKey()  { return !!getOpenRouterKey(); }
 
 export function saveOpenAIKey(key) {
   try { localStorage.setItem(LS_OPENAI, key.trim()); _openai = key.trim(); _loaded = false; loadKeys(); } catch {}
@@ -79,6 +90,10 @@ export function saveOpenAIKey(key) {
 
 export function saveDeepgramKey(key) {
   try { localStorage.setItem(LS_DEEPGRAM, key.trim()); _deepgram = key.trim(); _loaded = false; loadKeys(); } catch {}
+}
+
+export function saveOpenRouterKey(key) {
+  try { localStorage.setItem(LS_OPENROUTER, key.trim()); _openrouter = key.trim(); _loaded = false; loadKeys(); } catch {}
 }
 
 // ─── Integration tokens ────────────────────────────────────────────────────────

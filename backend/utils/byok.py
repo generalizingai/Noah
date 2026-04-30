@@ -68,6 +68,7 @@ BYOK_HEADERS = {
     'anthropic': 'x-byok-anthropic',
     'gemini': 'x-byok-gemini',
     'deepgram': 'x-byok-deepgram',
+    'openrouter': 'x-byok-openrouter',
 }
 
 # Keys for the current request, if the client supplied them.
@@ -172,10 +173,8 @@ def _check_byok_validity(uid: str) -> Optional[str]:
             is_active = age <= users_db.BYOK_HEARTBEAT_TTL_SECONDS
 
     if not is_active:
-        # Non-enrolled user — silently discard any BYOK headers so downstream
-        # code always uses Omi's own keys.
-        if _byok_ctx.get():
-            _byok_ctx.set(None)
+        # Non-enrolled user — pass through their BYOK keys as-is.
+        # Noah is a BYOK-first app: all users bring their own keys.
         return None
 
     # BYOK-active user with headers present — validate every enrolled

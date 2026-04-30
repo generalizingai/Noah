@@ -130,14 +130,20 @@ class AIAgent:
 
         Priority order:
           1. NOAH_HERMES_PROVIDER env var (explicit override)
-          2. OpenRouter integration env vars present → "openrouter"
-          3. Model name heuristics
+          2. User-provided BYOK OpenRouter key → "openrouter"
+          3. OpenRouter integration env vars present → "openrouter"
+          4. Model name heuristics
         """
         explicit = os.environ.get("NOAH_HERMES_PROVIDER", "").lower()
         if explicit in ("anthropic", "openai", "openrouter"):
             return explicit
 
-        # If the Replit OpenRouter integration is wired up, use it
+        # If user provided their own OpenRouter key via BYOK, use OpenRouter
+        from utils.byok import get_byok_key
+        if get_byok_key('openrouter'):
+            return "openrouter"
+
+        # If the OpenRouter integration is wired up server-side, use it
         if os.environ.get("AI_INTEGRATIONS_OPENROUTER_BASE_URL"):
             return "openrouter"
 
@@ -177,24 +183,25 @@ class AIAgent:
 
     def _get_anthropic_client(self):
         import anthropic
-        key = self._api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        from utils.byok import get_byok_key
+        key = self._api_key or get_byok_key('anthropic') or get_byok_key('openai') or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
         return anthropic.Anthropic(api_key=key)
 
     def _get_openai_client(self):
         from openai import OpenAI
-        key = self._api_key or os.environ.get("OPENAI_API_KEY")
+        from utils.byok import get_byok_key
+        key = self._api_key or get_byok_key('openai') or os.environ.get("OPENAI_API_KEY")
         return OpenAI(api_key=key)
 
     def _get_openrouter_client(self):
-        """OpenAI-compatible client pointed at the OpenRouter proxy."""
+        """OpenAI-compatible client pointed at OpenRouter, using BYOK key if provided."""
         from openai import OpenAI
-        base_url = os.environ.get("AI_INTEGRATIONS_OPENROUTER_BASE_URL")
-        key = os.environ.get("AI_INTEGRATIONS_OPENROUTER_API_KEY", "dummy")
-        if not base_url:
-            raise RuntimeError(
-                "AI_INTEGRATIONS_OPENROUTER_BASE_URL is not set. "
-                "Run setupReplitAIIntegrations for OpenRouter first."
-            )
+        from utils.byok import get_byok_key
+        byok_key = get_byok_key('openrouter')
+        if byok_key:
+            return OpenAI(api_key=byok_key, base_url="https://openrouter.ai/api/v1")
+        base_url = os.environ.get("AI_INTEGRATIONS_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        key = os.environ.get("AI_INTEGRATIONS_OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "dummy")
         return OpenAI(api_key=key, base_url=base_url)
 
     # ── Tool execution ──────────────────────────────────────────────────────

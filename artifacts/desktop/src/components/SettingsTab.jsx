@@ -3,7 +3,8 @@ import { useAuth } from '../services/auth';
 import { isTTSAvailable, DEEPGRAM_VOICES, ELEVENLABS_VOICES, getActiveTTSProvider, previewVoice } from '../services/tts';
 import { getPTTKeyLabel, setPTTKey, getPTTKeycode, setPTTKeycode } from '../services/ptt';
 import {
-  saveOpenAIKey, saveDeepgramKey, getOpenAIKey, getDeepgramKey,
+  saveOpenAIKey, saveDeepgramKey, saveOpenRouterKey,
+  getOpenAIKey, getDeepgramKey, getOpenRouterKey,
   getVoiceModel, saveVoiceModel, getSystemInstructions, saveSystemInstructions,
   getIntegrations, saveAllIntegrations, getIntegrationToken,
 } from '../services/keys';
@@ -1095,17 +1096,20 @@ export default function SettingsTab() {
   const { user, signOut }   = useAuth();
   const ttsAvailable        = isTTSAvailable();
 
-  const [openaiKey,    setOpenaiKey]    = useState(getOpenAIKey);
-  const [deepgramKey,  setDeepgramKey]  = useState(getDeepgramKey);
-  const [openaiSaved,  setOpenaiSaved]  = useState(false);
-  const [deepgramSaved, setDeepgramSaved] = useState(false);
+  const [openaiKey,       setOpenaiKey]       = useState(getOpenAIKey);
+  const [deepgramKey,     setDeepgramKey]     = useState(getDeepgramKey);
+  const [openrouterKey,   setOpenrouterKey]   = useState(getOpenRouterKey);
+  const [openaiSaved,     setOpenaiSaved]     = useState(false);
+  const [deepgramSaved,   setDeepgramSaved]   = useState(false);
+  const [openrouterSaved, setOpenrouterSaved] = useState(false);
   const [screenPerm,   setScreenPerm]   = useState(null);
   const [checkingPerm, setCheckingPerm] = useState(false);
 
   const displayName = user?.displayName || user?.email?.split('@')[0] || 'User';
 
-  const handleSaveOpenAI  = () => { saveOpenAIKey(openaiKey);   setOpenaiSaved(true);   setTimeout(() => setOpenaiSaved(false),  3000); };
-  const handleSaveDeepgram = () => { saveDeepgramKey(deepgramKey); setDeepgramSaved(true); setTimeout(() => setDeepgramSaved(false), 3000); };
+  const handleSaveOpenAI    = () => { saveOpenAIKey(openaiKey);       setOpenaiSaved(true);     setTimeout(() => setOpenaiSaved(false),     3000); };
+  const handleSaveDeepgram  = () => { saveDeepgramKey(deepgramKey);   setDeepgramSaved(true);   setTimeout(() => setDeepgramSaved(false),   3000); };
+  const handleSaveOpenRouter = () => { saveOpenRouterKey(openrouterKey); setOpenrouterSaved(true); setTimeout(() => setOpenrouterSaved(false), 3000); };
 
   const checkScreenPermission = async () => {
     if (!isElectron) return;
@@ -1141,8 +1145,11 @@ export default function SettingsTab() {
         </Section>
 
         {/* API Keys */}
-        <Section icon={<ShieldKeyIcon size={12} strokeWidth={1.8} />} title="API Keys">
-          <ApiKeyInput label="OpenAI API Key" sub="Required for AI responses and speech-to-text"
+        <Section icon={<ShieldKeyIcon size={12} strokeWidth={1.8} />} title="API Keys"
+          description="Your keys are stored locally and sent securely to Noah's backend on every request. They are never stored on the server.">
+          <ApiKeyInput label="OpenRouter API Key" sub="Required for Hermes AI mode — get yours at openrouter.ai"
+            value={openrouterKey} onChange={setOpenrouterKey} onSave={handleSaveOpenRouter} placeholder="sk-or-v1-..." saved={openrouterSaved} />
+          <ApiKeyInput label="OpenAI API Key" sub="Used for Classic mode, Whisper STT, and screen vision"
             value={openaiKey} onChange={setOpenaiKey} onSave={handleSaveOpenAI} placeholder="sk-..." saved={openaiSaved} />
           <ApiKeyInput label="Deepgram API Key" sub="Required for voice output (text-to-speech)"
             value={deepgramKey} onChange={setDeepgramKey} onSave={handleSaveDeepgram} placeholder="Your Deepgram key…" saved={deepgramSaved} />

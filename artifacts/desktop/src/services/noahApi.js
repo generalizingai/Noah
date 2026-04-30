@@ -1,5 +1,25 @@
-import { getOpenAIKey, getSystemInstructions, getIntegrations } from './keys';
+import { getOpenAIKey, getDeepgramKey, getOpenRouterKey, getSystemInstructions, getIntegrations } from './keys';
 import { buildMemoryContext, addMemory } from './memory';
+
+function getByokHeaders() {
+  const headers = {};
+  const openai = getOpenAIKey();
+  const deepgram = getDeepgramKey();
+  const openrouter = getOpenRouterKey();
+  if (openai)     headers['X-BYOK-OpenAI']     = openai;
+  if (deepgram)   headers['X-BYOK-Deepgram']   = deepgram;
+  if (openrouter) headers['X-BYOK-OpenRouter']  = openrouter;
+  return headers;
+}
+
+function backendHeaders(token, extra = {}) {
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`,
+    ...getByokHeaders(),
+    ...extra,
+  };
+}
 
 // ─── Backend URL resolution ───────────────────────────────────────────────────
 // Priority (highest to lowest):
@@ -504,10 +524,7 @@ async function executeAndReportTool(callId, toolName, args, token) {
         try {
           await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/tool_result/${callId}`, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`,
-            },
+            headers: backendHeaders(token),
             body: JSON.stringify(result),
             signal: AbortSignal.timeout(15000),
           });
@@ -527,10 +544,7 @@ async function executeAndReportTool(callId, toolName, args, token) {
   try {
     const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/tool_result/${callId}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
+      headers: backendHeaders(token),
       body: JSON.stringify(result),
       signal: AbortSignal.timeout(15000),
     });
@@ -582,11 +596,7 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
   try {
     resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/chat`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'text/event-stream',
-      },
+      headers: backendHeaders(token, { Accept: 'text/event-stream' }),
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(180000),
     });
@@ -706,11 +716,7 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
     try {
       currentResp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/chat`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'text/event-stream',
-        },
+        headers: backendHeaders(token, { Accept: 'text/event-stream' }),
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(180000),
       });
@@ -760,7 +766,7 @@ export async function checkHermesStatus() {
 export async function getHermesSessions(token) {
   if (!token) throw new Error('Authentication required');
   const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/sessions`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: backendHeaders(token),
     signal: AbortSignal.timeout(8000),
   });
   if (!resp.ok) throw new Error(`Failed to load sessions (${resp.status})`);
@@ -774,7 +780,7 @@ export async function getHermesSessions(token) {
 export async function getHermesSessionHistory(sessionId, token) {
   if (!token) throw new Error('Authentication required');
   const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/sessions/${encodeURIComponent(sessionId)}/history`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: backendHeaders(token),
     signal: AbortSignal.timeout(8000),
   });
   if (!resp.ok) throw new Error(`Failed to load session history (${resp.status})`);
@@ -872,7 +878,7 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
 
 export async function listSkills(token) {
   const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/skills`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: backendHeaders(token),
   });
   if (!resp.ok) throw new Error(`Failed to list skills: ${resp.status}`);
   return resp.json();
@@ -880,7 +886,7 @@ export async function listSkills(token) {
 
 export async function getSkill(slug, token) {
   const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/skills/${encodeURIComponent(slug)}`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: backendHeaders(token),
   });
   if (!resp.ok) throw new Error(`Failed to get skill: ${resp.status}`);
   return resp.json();
@@ -889,7 +895,7 @@ export async function getSkill(slug, token) {
 export async function installSkill(content, scope = 'user', token) {
   const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/skills/install`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: backendHeaders(token),
     body: JSON.stringify({ content, scope }),
   });
   if (!resp.ok) {
@@ -902,7 +908,7 @@ export async function installSkill(content, scope = 'user', token) {
 export async function deleteSkill(slug, token) {
   const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/skills/${encodeURIComponent(slug)}`, {
     method: 'DELETE',
-    headers: { Authorization: `Bearer ${token}` },
+    headers: backendHeaders(token),
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
