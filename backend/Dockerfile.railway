@@ -36,5 +36,6 @@ COPY . .
 RUN mkdir -p data/skills/shared
 
 EXPOSE 8080
-# Use shell form so Railway's $PORT env var is expanded at runtime
-CMD uvicorn main:app --host 0.0.0.0 --port "${PORT:-8080}" --loop uvloop
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+CMD ["/app/start.sh"]
