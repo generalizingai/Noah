@@ -1,0 +1,26 @@
+kind = "web"
+previewPath = "/desktop/"
+title = "Noah Desktop App"
+version = "1.0.0"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/desktop/" ]
+localPort = 3001
+
+[services.development]
+run = "cd /home/runner/workspace/artifacts/desktop && node_modules/.bin/vite --host 0.0.0.0"
+
+[services.production]
+build = [ "sh", "-c", "cd /home/runner/workspace/artifacts/desktop && node_modules/.bin/vite build" ]
+publicDir = "artifacts/desktop/dist"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "3001"
+BASE_PATH = "/desktop/"

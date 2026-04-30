@@ -1,0 +1,102 @@
+modules = ["nodejs-24", "python-3.11"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "backend: Python AI Backend"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "artifacts/admin: Admin Dashboard"
+
+[[workflows.workflow]]
+name = "backend: Python AI Backend"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd backend && bash start.sh"
+waitForPort = 8001
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "artifacts/admin: Admin Dashboard"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd artifacts/admin && PORT=9000 ./node_modules/.bin/next dev --hostname 0.0.0.0"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[[ports]]
+localPort = 3001
+externalPort = 3001
+
+[[ports]]
+localPort = 3002
+externalPort = 3002
+
+[[ports]]
+localPort = 5173
+externalPort = 5173
+
+[[ports]]
+localPort = 8001
+externalPort = 3000
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 8081
+
+[[ports]]
+localPort = 9000
+externalPort = 9000
+
+[[ports]]
+localPort = 26126
+externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+REDIS_DB_PORT = "6379"
+PINECONE_INDEX_NAME = "memories"
+BACKEND_PORT = "8001"
+ENCRYPTION_SECRET = "omi_ZwB2ZNqB2HHpMK6wStk7sTpavJiPTFg7gXUHnc4tFABPU6pZ2c2DKgehtfgi4RZv"
+FIREBASE_PROJECT_ID = "noah-5163f"
+GOOGLE_CLOUD_PROJECT = "noah-5163f"
+GOOGLE_APPLICATION_CREDENTIALS = "google-credentials.json"
+NOAH_BRAIN_MODE = "hermes"
+NOAH_HERMES_MODEL = "google/gemma-4-31b-it"
+NOAH_HERMES_PROVIDER = "openrouter"
+
+[nix]
+channel = "stable-25_05"

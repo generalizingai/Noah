@@ -1,0 +1,78 @@
+{
+  "name": "noah-desktop",
+  "version": "1.0.0",
+  "description": "Noah AI Desktop Assistant",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"vite --port 5173\" \"wait-on http://localhost:5173 && electron .\"",
+    "vite": "vite",
+    "electron": "electron .",
+    "build": "vite build && electron-builder",
+    "build:mac": "vite build && electron-builder --mac",
+    "build:dmg": "vite build && electron-builder --mac dmg",
+    "release": "vite build && electron-builder --mac --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "firebase": "^11.0.0",
+    "hugeicons-react": "^0.4.0",
+    "openai": "^4.104.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "uiohook-napi": "^1.5.4"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "autoprefixer": "^10.5.0",
+    "concurrently": "^8.2.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.0.0",
+    "postcss": "^8.5.12",
+    "tailwindcss": "^3.4.19",
+    "vite": "^5.4.21",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "ai.noah.desktop",
+    "productName": "Noah",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "identity": null
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets"
+      }
+    ],
+    "npmRebuild": true,
+    "buildDependenciesFromSource": false,
+    "nodeGypRebuild": false,
+    "electronVersion": "31.0.0",
+    "nativeRebuilder": "legacy",
+    "publish": {
+      "provider": "github",
+      "owner": "generalizingai",
+      "repo": "Noah",
+      "releaseType": "release"
+    },
+    "afterSign": "scripts/notarize.js"
+  }
+}
