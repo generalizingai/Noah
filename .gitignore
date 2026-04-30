@@ -48,3 +48,5 @@ Thumbs.db
 .cache/
 .local/
 backend/google-credentials.json
+google-credentials.json
+backend/google-credentials.json
