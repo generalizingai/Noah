@@ -105,10 +105,11 @@ jobs:
         run: |
           VERSION="${RELEASE_VERSION#noah-v}"
           NOTES="## Noah Desktop ${VERSION}"$'\n\n'"Download the DMG, open it, and drag Noah to Applications."$'\n\n'"**First launch:** right-click Noah and choose Open (required once for unsigned builds)."
+          # Delete existing release for this tag if it exists (idempotent retries)
+          gh release delete "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
           gh release create "$RELEASE_VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Noah ${VERSION}" \
-            --clobber \
             --notes "$NOTES" \
             artifacts/desktop/dist/*.dmg \
             artifacts/desktop/dist/*.zip \
