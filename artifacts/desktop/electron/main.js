@@ -1,8 +1,24 @@
 const {
   app, BrowserWindow, ipcMain, screen,
   systemPreferences, desktopCapturer, shell,
-  Tray, Menu, nativeImage, globalShortcut, Notification, session
+  Tray, Menu, nativeImage, globalShortcut, Notification, session,
+  protocol, net,
 } = require('electron');
+
+// ── Custom app:// protocol ─────────────────────────────────────────────────────
+// MUST be called synchronously before app.ready (before app.whenReady resolves).
+// This registers "app" as a standard secure scheme, giving windows loaded from
+// app://localhost a real origin so Firebase Google sign-in works correctly.
+// (file:// has a null origin that Firebase and OAuth providers reject.)
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'app',
+  privileges: {
+    standard: true,       // behaves like https (relative URLs, cookies, storage)
+    secure: true,         // treated as secure context (getUserMedia, etc.)
+    supportFetchAPI: true,
+    corsEnabled: false,   // no CORS preflight — all same-origin locally
+  },
+}]);
 const path = require('path');
 const fs   = require('fs');
 const http  = require('http');
@@ -143,18 +159,18 @@ function createMainWindow() {
     },
   });
 
-  const distMain = path.join(__dirname, '../dist/index.html');
   const isRemoteUI = !VITE_URL.includes('localhost') && !VITE_URL.includes('127.0.0.1');
-  if (isDev || isRemoteUI) {
-    mainWindow.loadURL(isDev ? VITE_URL + '/' : VITE_URL + '/').catch(() => {
-      mainWindow.loadFile(distMain);
-    });
+  if (isDev) {
+    mainWindow.loadURL(VITE_URL + '/').catch(() => mainWindow.loadURL('app://localhost/'));
+  } else if (isRemoteUI) {
+    mainWindow.loadURL(VITE_URL + '/');
   } else {
-    mainWindow.loadFile(distMain);
+    // Production: app:// protocol serves dist/ with a real origin so Firebase works
+    mainWindow.loadURL('app://localhost/');
   }
 
   // ── Diagnostics: open DevTools + log all renderer events to ~/noah-debug.log ─
-  noahLog('main window created, isDev=', isDev, 'distMain=', distMain);
+  noahLog('main window created, isDev=', isDev);
 
   mainWindow.webContents.on('did-start-loading', () => noahLog('did-start-loading'));
   mainWindow.webContents.on('did-stop-loading',  () => noahLog('did-stop-loading'));
@@ -233,14 +249,13 @@ function createFloatingBar() {
     },
   });
 
-  const distIndex = path.join(__dirname, '../dist/index.html');
   const isRemoteUIBar = !VITE_URL.includes('localhost') && !VITE_URL.includes('127.0.0.1');
-  if (isDev || isRemoteUIBar) {
-    floatingBar.loadURL(VITE_URL + '/floating-bar').catch(() => {
-      floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
-    });
+  if (isDev) {
+    floatingBar.loadURL(VITE_URL + '/floating-bar').catch(() => floatingBar.loadURL('app://localhost/#/floating-bar'));
+  } else if (isRemoteUIBar) {
+    floatingBar.loadURL(VITE_URL + '/floating-bar');
   } else {
-    floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
+    floatingBar.loadURL('app://localhost/#/floating-bar');
   }
 
   floatingBar.setAlwaysOnTop(true, 'screen-saver');
@@ -762,6 +777,22 @@ app.whenReady().then(async () => {
   });
 
   noahLog(`app ready, isDev=${isDev}, isPackaged=${app.isPackaged}`);
+
+  // ── Register app:// protocol handler (production) ─────────────────────────
+  // Serves the bundled dist/ directory over app://localhost/, giving the
+  // renderer a real origin so Firebase Google sign-in works correctly.
+  if (!isDev) {
+    const distDir = path.join(__dirname, '../dist');
+    protocol.handle('app', (request) => {
+      const { pathname } = new URL(request.url);
+      // Root → index.html; strip leading slash for path.join
+      const relative = (pathname === '/' || pathname === '') ? 'index.html' : pathname.replace(/^\//, '');
+      const filePath = path.join(distDir, relative);
+      noahLog(`app:// serving ${pathname} → ${filePath}`);
+      // net.fetch with file:// reads directly from the asar archive
+      return net.fetch('file://' + filePath);
+    });
+  }
 
   createMainWindow();
   createFloatingBar();
