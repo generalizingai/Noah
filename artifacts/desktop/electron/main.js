@@ -198,8 +198,6 @@ function createMainWindow() {
     if (level >= 2) noahLog(`console[${level}] ${message} (${sourceId}:${line})`);
   });
 
-  // Open DevTools so errors are visible (temporary diagnostic build)
-  mainWindow.webContents.openDevTools();
 
   // Allow Firebase auth popup windows (Google sign-in)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -664,24 +662,24 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
     } }
   </script>
   <script type="module">
-    import { initializeApp }                                    from 'firebase/app';
-    import { getAuth, GoogleAuthProvider, signInWithPopup,
-             GoogleAuthProvider as GAP }                        from 'firebase/auth';
+    import { initializeApp }         from 'firebase/app';
+    import { getAuth, GoogleAuthProvider,
+             signInWithRedirect, getRedirectResult } from 'firebase/auth';
 
     const config = ${configJson};
     const fbApp  = initializeApp(config);
     const auth   = getAuth(fbApp);
 
-    window.startSignIn = async () => {
-      const btn = document.getElementById('google-btn');
-      const status = document.getElementById('status');
-      btn.disabled = true;
-      status.textContent = 'Opening Google sign-in…';
-      try {
-        const provider = new GoogleAuthProvider();
-        const result   = await signInWithPopup(auth, provider);
-        const cred     = GoogleAuthProvider.credentialFromResult(result);
-        status.textContent = 'Signing in…';
+    // On every page load check if we're returning from a Google redirect
+    const status = document.getElementById('status');
+    status.textContent = 'Checking sign-in status…';
+
+    try {
+      const result = await getRedirectResult(auth);
+      if (result) {
+        // Returning from Google OAuth — extract credential and send to app
+        const cred = GoogleAuthProvider.credentialFromResult(result);
+        status.textContent = 'Completing sign-in…';
         await fetch('/credential', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -689,18 +687,30 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
         });
         document.getElementById('signin-view').style.display  = 'none';
         document.getElementById('success-view').style.display = 'block';
-      } catch (err) {
-        document.getElementById('signin-view').style.display  = 'none';
-        document.getElementById('error-view').style.display   = 'block';
-        document.getElementById('error-msg').textContent = err.message || String(err);
+      } else {
+        // Fresh load — show the sign-in button
+        status.textContent = '';
       }
+    } catch (err) {
+      status.textContent = '';
+      // Don't block UI on redirect-result errors (e.g. page loaded fresh)
+    }
+
+    window.startSignIn = () => {
+      // signInWithRedirect navigates the current tab directly to Google —
+      // no popup, no popup-blocker, works in every browser.
+      const btn = document.getElementById('google-btn');
+      btn.disabled = true;
+      status.textContent = 'Redirecting to Google…';
+      const provider = new GoogleAuthProvider();
+      signInWithRedirect(auth, provider);
     };
 
     window.resetView = () => {
       document.getElementById('signin-view').style.display  = 'block';
       document.getElementById('error-view').style.display   = 'none';
       document.getElementById('google-btn').disabled = false;
-      document.getElementById('status').textContent = '';
+      status.textContent = '';
     };
   </script>
 </body>
@@ -718,11 +728,14 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
 
           try {
             const { idToken, accessToken } = JSON.parse(body);
-            // Relay credential to whichever renderer is currently focused
-            const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
-            if (win) {
-              win.webContents.send('google-auth-result', { idToken, accessToken });
-              win.focus();
+            // Send credential directly to the main window (not floating bar or others)
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('google-auth-result', { idToken, accessToken });
+              mainWindow.focus();
+            } else {
+              // Fallback: try any non-floating window
+              const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && w !== floatingBar);
+              if (win) { win.webContents.send('google-auth-result', { idToken, accessToken }); win.focus(); }
             }
           } catch (e) {
             noahLog('start-google-auth credential parse error:', e.message);
