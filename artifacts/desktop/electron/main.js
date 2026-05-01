@@ -547,8 +547,10 @@ ipcMain.handle('get-brain-mode', () => _brainMode);
 // the real browser → page POSTs the Google credential back → we relay to renderer.
 ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
   return new Promise((resolve) => {
+    let authWin = null;   // reference shared between server handler and listen callback
+
     const server = http.createServer((req, res) => {
-      if (req.method === 'GET' && req.url === '/') {
+      if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
         // Serve the sign-in page with Firebase config embedded
         const configJson = JSON.stringify(firebaseConfig);
         const html = `<!DOCTYPE html>
@@ -662,23 +664,37 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
     } }
   </script>
   <script type="module">
-    import { initializeApp }         from 'firebase/app';
-    import { getAuth, GoogleAuthProvider,
-             signInWithRedirect, getRedirectResult } from 'firebase/auth';
+    import { initializeApp }                                          from 'firebase/app';
+    import { getAuth, GoogleAuthProvider, signInWithPopup,
+             onAuthStateChanged }                                     from 'firebase/auth';
 
     const config = ${configJson};
     const fbApp  = initializeApp(config);
     const auth   = getAuth(fbApp);
 
-    // On every page load check if we're returning from a Google redirect
+    const btn    = document.getElementById('google-btn');
     const status = document.getElementById('status');
-    status.textContent = 'Checking sign-in status…';
 
-    try {
-      const result = await getRedirectResult(auth);
-      if (result) {
-        // Returning from Google OAuth — extract credential and send to app
-        const cred = GoogleAuthProvider.credentialFromResult(result);
+    // ── Wait for the auth SDK to finish its async startup before enabling ──
+    // Firebase initialises IndexedDB and restores any persisted session.
+    // Until that first onAuthStateChanged fires the SDK isn't safe to use,
+    // which is why a too-fast click produces an opaque "Error."
+    btn.disabled = true;
+    status.textContent = 'Initialising…';
+
+    const unsub = onAuthStateChanged(auth, () => {
+      unsub();                          // one-shot
+      btn.disabled = false;
+      status.textContent = '';
+    });
+
+    window.startSignIn = async () => {
+      btn.disabled = true;
+      status.textContent = 'Opening Google sign-in…';
+      try {
+        const provider = new GoogleAuthProvider();
+        const result   = await signInWithPopup(auth, provider);
+        const cred     = GoogleAuthProvider.credentialFromResult(result);
         status.textContent = 'Completing sign-in…';
         await fetch('/credential', {
           method: 'POST',
@@ -687,29 +703,21 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
         });
         document.getElementById('signin-view').style.display  = 'none';
         document.getElementById('success-view').style.display = 'block';
-      } else {
-        // Fresh load — show the sign-in button
+      } catch (err) {
+        btn.disabled = false;
         status.textContent = '';
+        document.getElementById('signin-view').style.display  = 'none';
+        document.getElementById('error-view').style.display   = 'block';
+        document.getElementById('error-msg').textContent = err.code
+          ? err.code + ': ' + err.message
+          : (err.message || String(err));
       }
-    } catch (err) {
-      status.textContent = '';
-      // Don't block UI on redirect-result errors (e.g. page loaded fresh)
-    }
-
-    window.startSignIn = () => {
-      // signInWithRedirect navigates the current tab directly to Google —
-      // no popup, no popup-blocker, works in every browser.
-      const btn = document.getElementById('google-btn');
-      btn.disabled = true;
-      status.textContent = 'Redirecting to Google…';
-      const provider = new GoogleAuthProvider();
-      signInWithRedirect(auth, provider);
     };
 
     window.resetView = () => {
       document.getElementById('signin-view').style.display  = 'block';
       document.getElementById('error-view').style.display   = 'none';
-      document.getElementById('google-btn').disabled = false;
+      btn.disabled = false;
       status.textContent = '';
     };
   </script>
@@ -728,6 +736,10 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
 
           try {
             const { idToken, accessToken } = JSON.parse(body);
+
+            // Close the auth window — user is signed in
+            if (authWin && !authWin.isDestroyed()) { authWin.close(); authWin = null; }
+
             // Send credential directly to the main window (not floating bar or others)
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send('google-auth-result', { idToken, accessToken });
@@ -765,8 +777,55 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
     server.listen(0, 'localhost', () => {
       const { port } = server.address();
       const url = `http://localhost:${port}/`;
-      noahLog('Google auth server listening at', url);
-      shell.openExternal(url);
+      noahLog('Google auth server at', url);
+
+      // ── Open a dedicated Electron window for auth ──────────────────────────
+      // Using an Electron BrowserWindow (not shell.openExternal / system browser)
+      // means:
+      //  • No Safari/Chrome popup blocker — window.open is controlled by our
+      //    setWindowOpenHandler below
+      //  • window.opener is properly set in the Firebase popup window
+      //  • postMessage between Electron windows works without origin restrictions
+      //  • signInWithPopup works on first click (no async timing race)
+      authWin = new BrowserWindow({
+        width: 460,
+        height: 600,
+        title: 'Sign in to Noah',
+        resizable: false,
+        minimizable: false,
+        fullscreenable: false,
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          // No preload — this window only loads our local auth page
+        },
+      });
+
+      // Allow Firebase's Google OAuth popup to open inside this window
+      authWin.webContents.setWindowOpenHandler(({ url: popupUrl }) => {
+        if (
+          popupUrl.includes('accounts.google.com') ||
+          popupUrl.includes('firebaseapp.com') ||
+          popupUrl.includes('google.com/o/oauth2')
+        ) {
+          return {
+            action: 'allow',
+            overrideBrowserWindowOptions: {
+              width: 500, height: 650,
+              resizable: false,
+              webPreferences: { contextIsolation: true, nodeIntegration: false },
+            },
+          };
+        }
+        return { action: 'deny' };
+      });
+
+      authWin.on('closed', () => {
+        authWin = null;
+        if (server.listening) server.close();
+      });
+
+      authWin.loadURL(url);
       resolve({ started: true, port });
     });
 
