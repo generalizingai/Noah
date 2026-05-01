@@ -68,8 +68,7 @@
       "provider": "github",
       "owner": "generalizingai",
       "repo": "Noah",
-      "releaseType": "release",
-      "tag": "noah-v${version}"
+      "releaseType": "release"
     },
     "afterSign": "scripts/notarize.js"
   }
