@@ -153,8 +153,6 @@ export default function AssistantTab({ messages, setMessages }) {
   const [historyError,   setHistoryError]     = useState(null);
   const [restoringId,    setRestoringId]      = useState(null);
 
-  const isHermesMode = getHermesBrainMode() === 'hermes';
-
   const recorderRef    = useRef(null);
   const pttRef         = useRef(null);
   const watchScreenRef = useRef(null);
@@ -257,6 +255,15 @@ export default function AssistantTab({ messages, setMessages }) {
     pttRef.current = mgr;
     return () => mgr.stop();
   }, [startListening, stopListening]);
+
+  // Load Hermes brain mode on component mount
+  useEffect(() => {
+    const loadBrainMode = async () => {
+      const mode = await getHermesBrainMode();
+      setIsHermesMode(mode === 'hermes');
+    };
+    loadBrainMode();
+  }, []);
 
   useEffect(() => {
     if (!isElectron) return;

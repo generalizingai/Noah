@@ -38,8 +38,30 @@ if (typeof window !== 'undefined' && window.electronAPI?.getBackendUrl) {
   }).catch(() => {});
 }
 
-export function getHermesBrainMode() {
-  try { return localStorage.getItem('noah_brain_mode') || 'classic'; } catch { return 'classic'; }
+export async function checkHermesStatus() {
+  try {
+    const response = await fetch(`${NOAH_BACKEND_URL}/hermes/status`, {
+      method: 'GET',
+      headers: getByokHeaders(),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function getHermesBrainMode() {
+  try {
+    const localMode = localStorage.getItem('noah_brain_mode');
+    if (localMode === 'hermes') return 'hermes';
+
+    const isHermesOnline = await checkHermesStatus();
+    if (isHermesOnline) {
+      localStorage.setItem('noah_brain_mode', 'hermes');
+      return 'hermes';
+    }
+  } catch {}
+  return 'classic';
 }
 
 export function setHermesBrainMode(mode) {
