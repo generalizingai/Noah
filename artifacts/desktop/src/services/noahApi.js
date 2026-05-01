@@ -763,21 +763,6 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
 
 // ─── Hermes status check ──────────────────────────────────────────────────────
 
-/**
- * Check if the backend's Hermes mode is active.
- * Returns { active: bool, mode: string, model: string } or null on failure.
- */
-export async function checkHermesStatus() {
-  try {
-    const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/status`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!resp.ok) return null;
-    return await resp.json();
-  } catch {
-    return null;
-  }
-}
 
 // ─── Hermes session history ───────────────────────────────────────────────────
 
