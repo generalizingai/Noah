@@ -579,15 +579,10 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
       text-align: center;
     }
     .logo {
-      width: 56px;
-      height: 56px;
-      background: linear-gradient(135deg, #4ade80, #22d3ee);
-      border-radius: 14px;
+      width: 72px;
+      height: 72px;
       margin: 0 auto 24px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 28px;
+      display: block;
     }
     h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
     .subtitle { color: #6b7280; font-size: 14px; margin-bottom: 32px; }
@@ -636,7 +631,7 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
 <body>
   <div class="card">
     <div id="signin-view">
-      <div class="logo">✦</div>
+      <img class="logo" src="/logo.png" alt="Noah" />
       <h1>Sign in to Noah</h1>
       <p class="subtitle">Use your Google account to continue</p>
       <button class="btn-google" id="google-btn" onclick="startSignIn()">
@@ -735,15 +730,28 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
           resolve({ started: true });
         });
 
+      } else if (req.method === 'GET' && req.url === '/logo.png') {
+        // Serve Noah logo from the bundled dist directory
+        const logoPath = path.join(__dirname, '../dist/noah-logo.png');
+        try {
+          const logoData = fs.readFileSync(logoPath);
+          res.writeHead(200, { 'Content-Type': 'image/png' });
+          res.end(logoData);
+        } catch (_) {
+          res.writeHead(404); res.end();
+        }
+
       } else {
         res.writeHead(404);
         res.end();
       }
     });
 
-    server.listen(0, '127.0.0.1', () => {
+    // IMPORTANT: bind to "localhost" not "127.0.0.1".
+    // Firebase's authorized domains includes "localhost" by default but NOT "127.0.0.1".
+    server.listen(0, 'localhost', () => {
       const { port } = server.address();
-      const url = `http://127.0.0.1:${port}/`;
+      const url = `http://localhost:${port}/`;
       noahLog('Google auth server listening at', url);
       shell.openExternal(url);
       resolve({ started: true, port });
