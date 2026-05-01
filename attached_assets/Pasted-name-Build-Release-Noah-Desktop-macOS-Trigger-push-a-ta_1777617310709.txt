@@ -76,7 +76,6 @@ jobs:
             -S apple-tool:,apple: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> $GITHUB_ENV
-
       # ── 6. Build + package ──────────────────────────────────────────────────
       - name: Build and publish DMG
         working-directory: artifacts/desktop
@@ -92,7 +91,6 @@ jobs:
           VERSION="${RELEASE_VERSION#noah-v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           npm run release
-
       # ── 7. Confirm ─────────────────────────────────────────────────────────
       - name: List release artifacts
         working-directory: artifacts/desktop/dist
