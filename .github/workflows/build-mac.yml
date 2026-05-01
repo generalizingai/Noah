@@ -100,9 +100,23 @@ jobs:
           RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${RELEASE_VERSION#noah-v}"
-          gh release edit "${{ github.ref_name }}" \
-            --title "Noah $VERSION" \
-            --notes "Noah Desktop App v${VERSION} for macOS (Apple Silicon + Intel)"
+          NOTES="Noah Desktop App v${VERSION} for macOS (Apple Silicon + Intel)"
+
+          # electron-builder now uses "noah-v${version}" as the tag (set in package.json).
+          # We also try "v${VERSION}" as a fallback in case of mismatch.
+          # Retry up to 5 times (10 s apart) in case the release is still being created.
+          for TAG in "noah-v${VERSION}" "v${VERSION}" "${{ github.ref_name }}"; do
+            for attempt in 1 2 3 4 5; do
+              if gh release edit "$TAG" --title "Noah ${VERSION}" --notes "$NOTES" 2>/dev/null; then
+                echo "Updated release notes for tag: $TAG"
+                exit 0
+              fi
+              echo "Tag $TAG not found yet (attempt $attempt/5) — retrying in 10 s…"
+              sleep 10
+            done
+          done
+          echo "Warning: could not update release notes — release may still be processing."
+          exit 0
 
       # ── 8. Confirm ─────────────────────────────────────────────────────────
       - name: List release artifacts
