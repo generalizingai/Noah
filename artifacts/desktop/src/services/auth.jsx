@@ -6,16 +6,16 @@ import {
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   GoogleAuthProvider,
-  signInWithPopup,
+  signInWithCredential,
 } from 'firebase/auth';
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket:     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  appId:             import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
 let app;
@@ -46,6 +46,43 @@ export function AuthProvider({ children }) {
   };
 
   const signInWithGoogle = async () => {
+    // In Electron: delegate OAuth to the system browser via a local HTTP server.
+    // This avoids every popup/redirect restriction that Electron imposes on custom
+    // protocol origins (app://, file://).  The browser page does signInWithPopup
+    // normally (localhost is always in Firebase's authorized domains), then POSTs
+    // the raw Google credential (idToken + accessToken) back to the local server,
+    // which relays it here so we can call signInWithCredential on this Firebase
+    // instance.
+    if (window.electronAPI?.startGoogleAuth) {
+      return new Promise((resolve, reject) => {
+        // Register the one-time result listener BEFORE opening the browser
+        const cleanup = window.electronAPI.onGoogleAuthResult(async (result) => {
+          if (result.error) {
+            reject(new Error(result.error));
+            return;
+          }
+          try {
+            const credential = GoogleAuthProvider.credential(
+              result.idToken,
+              result.accessToken,
+            );
+            const userCredential = await signInWithCredential(auth, credential);
+            resolve(userCredential);
+          } catch (err) {
+            reject(err);
+          }
+        });
+
+        // Open browser (non-blocking — resolves immediately after server starts)
+        window.electronAPI.startGoogleAuth(firebaseConfig).catch((err) => {
+          cleanup();
+          reject(err);
+        });
+      });
+    }
+
+    // Fallback for non-Electron (dev server in browser)
+    const { signInWithPopup } = await import('firebase/auth');
     const provider = new GoogleAuthProvider();
     return signInWithPopup(auth, provider);
   };

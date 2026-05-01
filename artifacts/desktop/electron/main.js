@@ -544,6 +544,223 @@ ipcMain.handle('set-brain-mode', (_, mode) => {
 
 ipcMain.handle('get-brain-mode', () => _brainMode);
 
+// ─── IPC: Google sign-in via system browser ───────────────────────────────────
+// Opens a local HTTP server → serves a Firebase auth page → user signs in in
+// the real browser → page POSTs the Google credential back → we relay to renderer.
+ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/') {
+        // Serve the sign-in page with Firebase config embedded
+        const configJson = JSON.stringify(firebaseConfig);
+        const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in to Noah</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0d0f1a;
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      background: #151827;
+      border: 1px solid #2a2d3e;
+      border-radius: 20px;
+      padding: 48px 40px;
+      width: 380px;
+      text-align: center;
+    }
+    .logo {
+      width: 56px;
+      height: 56px;
+      background: linear-gradient(135deg, #4ade80, #22d3ee);
+      border-radius: 14px;
+      margin: 0 auto 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+    }
+    h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+    .subtitle { color: #6b7280; font-size: 14px; margin-bottom: 32px; }
+    .btn-google {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      padding: 13px 20px;
+      background: #fff;
+      color: #1f2937;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-google:hover { background: #f3f4f6; }
+    .btn-google:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status {
+      margin-top: 24px;
+      font-size: 14px;
+      color: #6b7280;
+      min-height: 20px;
+    }
+    .success-icon { font-size: 48px; margin-bottom: 16px; }
+    .success-title { font-size: 20px; font-weight: 600; color: #4ade80; margin-bottom: 8px; }
+    .success-sub { color: #6b7280; font-size: 14px; line-height: 1.5; }
+    #success-view, #error-view { display: none; }
+    .error-title { font-size: 18px; font-weight: 600; color: #f87171; margin-bottom: 8px; }
+    .error-msg { color: #6b7280; font-size: 13px; margin-bottom: 20px; word-break: break-word; }
+    .btn-retry {
+      background: transparent;
+      border: 1px solid #374151;
+      color: #d1d5db;
+      padding: 10px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn-retry:hover { background: #1f2937; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div id="signin-view">
+      <div class="logo">✦</div>
+      <h1>Sign in to Noah</h1>
+      <p class="subtitle">Use your Google account to continue</p>
+      <button class="btn-google" id="google-btn" onclick="startSignIn()">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#4285F4"/>
+          <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#34A853"/>
+          <path d="M3.964 10.707A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.707V4.961H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.039l3.007-2.332z" fill="#FBBC05"/>
+          <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.96L3.964 6.292C4.672 4.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+        </svg>
+        Continue with Google
+      </button>
+      <div class="status" id="status"></div>
+    </div>
+    <div id="success-view">
+      <div class="success-icon">✓</div>
+      <div class="success-title">You're signed in!</div>
+      <p class="success-sub">Return to Noah — you're all set.<br>You can close this tab.</p>
+    </div>
+    <div id="error-view">
+      <div class="error-title">Sign-in failed</div>
+      <div class="error-msg" id="error-msg"></div>
+      <button class="btn-retry" onclick="resetView()">Try again</button>
+    </div>
+  </div>
+
+  <script type="importmap">
+    { "imports": {
+        "firebase/app":  "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js"
+    } }
+  </script>
+  <script type="module">
+    import { initializeApp }                                    from 'firebase/app';
+    import { getAuth, GoogleAuthProvider, signInWithPopup,
+             GoogleAuthProvider as GAP }                        from 'firebase/auth';
+
+    const config = ${configJson};
+    const fbApp  = initializeApp(config);
+    const auth   = getAuth(fbApp);
+
+    window.startSignIn = async () => {
+      const btn = document.getElementById('google-btn');
+      const status = document.getElementById('status');
+      btn.disabled = true;
+      status.textContent = 'Opening Google sign-in…';
+      try {
+        const provider = new GoogleAuthProvider();
+        const result   = await signInWithPopup(auth, provider);
+        const cred     = GoogleAuthProvider.credentialFromResult(result);
+        status.textContent = 'Signing in…';
+        await fetch('/credential', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken: cred.idToken, accessToken: cred.accessToken }),
+        });
+        document.getElementById('signin-view').style.display  = 'none';
+        document.getElementById('success-view').style.display = 'block';
+      } catch (err) {
+        document.getElementById('signin-view').style.display  = 'none';
+        document.getElementById('error-view').style.display   = 'block';
+        document.getElementById('error-msg').textContent = err.message || String(err);
+      }
+    };
+
+    window.resetView = () => {
+      document.getElementById('signin-view').style.display  = 'block';
+      document.getElementById('error-view').style.display   = 'none';
+      document.getElementById('google-btn').disabled = false;
+      document.getElementById('status').textContent = '';
+    };
+  </script>
+</body>
+</html>`;
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(html);
+
+      } else if (req.method === 'POST' && req.url === '/credential') {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+          server.close();
+
+          try {
+            const { idToken, accessToken } = JSON.parse(body);
+            // Relay credential to whichever renderer is currently focused
+            const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
+            if (win) {
+              win.webContents.send('google-auth-result', { idToken, accessToken });
+              win.focus();
+            }
+          } catch (e) {
+            noahLog('start-google-auth credential parse error:', e.message);
+          }
+          resolve({ started: true });
+        });
+
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      const url = `http://127.0.0.1:${port}/`;
+      noahLog('Google auth server listening at', url);
+      shell.openExternal(url);
+      resolve({ started: true, port });
+    });
+
+    // Auto-close after 5 minutes to avoid stale servers
+    setTimeout(() => {
+      if (server.listening) {
+        server.close();
+        const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
+        if (win) win.webContents.send('google-auth-result', { error: 'Sign-in timed out. Please try again.' });
+        resolve({ started: false, error: 'timeout' });
+      }
+    }, 5 * 60 * 1000);
+  });
+});
+
 // ─── IPC: Task execution ──────────────────────────────────────────────────────
 
 ipcMain.handle('run-shell', async (_, command) => {

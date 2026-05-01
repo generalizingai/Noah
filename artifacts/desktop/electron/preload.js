@@ -73,6 +73,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setBrainMode:       (mode)      => ipcRenderer.invoke('set-brain-mode', mode),
   getBrainMode:       ()          => ipcRenderer.invoke('get-brain-mode'),
 
+  // Google sign-in via system browser (avoids Electron popup restrictions)
+  startGoogleAuth: (firebaseConfig) => ipcRenderer.invoke('start-google-auth', firebaseConfig),
+  onGoogleAuthResult: (cb) => {
+    const listener = (_, result) => cb(result);
+    ipcRenderer.once('google-auth-result', listener);
+    return () => ipcRenderer.removeListener('google-auth-result', listener);
+  },
+
   // Floating bar Q&A relay
   relayFloatingQA:    (data)      => ipcRenderer.send('floating-qa', data),
   // Live event: fires whenever a new Q&A arrives while the window is open
