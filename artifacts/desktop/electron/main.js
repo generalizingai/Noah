@@ -58,6 +58,18 @@ function buildKeycodeLabels(uiohookKeyEnum) {
 }
 let KEYCODE_LABELS = buildKeycodeLabels(UiohookKey);
 
+// ── Diagnostic logger → ~/noah-debug.log ─────────────────────────────────────
+function noahLog(...args) {
+  const msg = args.join(' ');
+  console.log('[Noah]', msg);
+  try {
+    fs.appendFileSync(
+      path.join(os.homedir(), 'noah-debug.log'),
+      `[${new Date().toISOString()}] ${msg}\n`
+    );
+  } catch {}
+}
+
 // Ensure macOS always identifies this app as "Noah" in dialogs and permission prompts
 app.setName('Noah');
 
@@ -181,7 +193,7 @@ function startUIServer() {
     // Port 0 → OS picks an available port
     uiServer.listen(0, '127.0.0.1', () => {
       uiPort = uiServer.address().port;
-      console.log(`[Noah] UI server listening on http://127.0.0.1:${uiPort}`);
+      noahLog(`UI server listening on http://127.0.0.1:${uiPort}`);
       resolve(uiPort);
     });
     uiServer.on('error', reject);
@@ -220,6 +232,39 @@ function createMainWindow() {
     // Production: local HTTP server serving dist/
     mainWindow.loadURL(`http://127.0.0.1:${uiPort}/`);
   }
+
+  // ── Diagnostics: open DevTools + log all renderer events to ~/noah-debug.log ─
+  noahLog('main window created, uiPort=', uiPort, 'isDev=', isDev);
+
+  mainWindow.webContents.on('did-start-loading', () => noahLog('did-start-loading'));
+  mainWindow.webContents.on('did-stop-loading',  () => noahLog('did-stop-loading'));
+  mainWindow.webContents.on('did-finish-load',   () => noahLog('did-finish-load'));
+  mainWindow.webContents.on('dom-ready',         () => noahLog('dom-ready'));
+  let failedOnce = false;
+  mainWindow.webContents.on('did-fail-load', (e, code, desc, url) => {
+    noahLog(`did-fail-load code=${code} desc=${desc} url=${url}`);
+    if (failedOnce) return;
+    failedOnce = true;
+    // Show a visible error page instead of a black screen
+    const html = `<html><body style="background:#111;color:#f44;font:16px monospace;padding:20px">
+      <h2>Noah failed to load</h2>
+      <p>Error ${code}: ${desc}</p>
+      <p>URL: ${url}</p>
+      <p>uiPort: ${uiPort}</p>
+      <p>isDev: ${isDev}</p>
+      <p>Log: ~/noah-debug.log</p>
+    </body></html>`;
+    mainWindow.webContents.loadURL('data:text/html,' + encodeURIComponent(html));
+  });
+  mainWindow.webContents.on('render-process-gone', (e, details) => {
+    noahLog(`render-process-gone reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  mainWindow.webContents.on('console-message', (e, level, message, line, sourceId) => {
+    if (level >= 2) noahLog(`console[${level}] ${message} (${sourceId}:${line})`);
+  });
+
+  // Open DevTools so errors are visible (temporary diagnostic build)
+  mainWindow.webContents.openDevTools();
 
   // Allow Firebase auth popup windows (Google sign-in)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -799,13 +844,13 @@ app.whenReady().then(async () => {
   });
 
   // ── Start local UI server for production (serves dist/ over HTTP) ──────────
+  noahLog(`app ready, isDev=${isDev}, isPackaged=${app.isPackaged}`);
   if (!isDev) {
     try {
       await startUIServer();
     } catch (err) {
-      console.error('[Noah] UI server failed to start:', err);
-      // Fall back: try a fixed port
-      uiPort = 14159;
+      noahLog(`UI server failed to start: ${err.message}`);
+      uiPort = 0; // will cause a clear connection-refused error
     }
   }
 
