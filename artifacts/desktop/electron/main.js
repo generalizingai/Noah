@@ -125,7 +125,8 @@ function startLocalFileServer(distDir) {
         const ext  = path.extname(filePath).toLowerCase();
         res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
         res.end(data);
-      } catch {
+      } catch (err) {
+        console.error('[LocalServer] 404:', filePath, err.message);
         res.writeHead(404); res.end('Not found');
       }
     });
@@ -763,12 +764,20 @@ app.whenReady().then(async () => {
   // Start local file server in production so Firebase OAuth works
   // (file:// origin is blocked by Firebase; localhost is whitelisted by default)
   if (app.isPackaged) {
-    // dist/ is listed in asarUnpack so it lives at app.asar.unpacked/dist
-    // — real files on disk that the HTTP server can read without ASAR limitations
+    // Try several candidate paths in priority order:
+    //  1. asarUnpack path  — real files (current build with asarUnpack config)
+    //  2. app.asar virtual — Electron's patched fs can read these too
+    //  3. __dirname-relative — last resort
     const appPath = app.getAppPath();
-    const distDir = appPath.endsWith('.asar')
-      ? path.join(appPath + '.unpacked', 'dist')
-      : path.join(appPath, 'dist');
+    const candidates = [
+      path.join(process.resourcesPath, 'app.asar.unpacked', 'dist'),
+      path.join(appPath.replace(/app\.asar$/, ''), 'app.asar.unpacked', 'dist'),
+      path.join(appPath, 'dist'),
+      path.join(__dirname, '../dist'),
+    ];
+    const distDir = candidates.find(p => {
+      try { return fs.existsSync(path.join(p, 'index.html')); } catch { return false; }
+    }) || candidates[2]; // fallback to ASAR path even if existsSync lied
     await startLocalFileServer(distDir);
   }
 
