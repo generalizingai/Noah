@@ -742,28 +742,53 @@ app.whenReady().then(async () => {
 
   // Register app:// protocol handler (production only).
   // This gives the window location.hostname='localhost' which Firebase whitelists for OAuth.
-  // net.fetch('file://...') is used internally — Electron resolves ASAR paths automatically.
+  // Uses fs.readFileSync — Node.js's fs is ASAR-patched by Electron, so this works
+  // whether or not asar is enabled in the build.
   if (app.isPackaged) {
-    const appPath = app.getAppPath();
-    // dist/ is either inside app.asar (Electron's fs patches handle it)
-    // or in app.asar.unpacked/ if asarUnpack is set — both work via net.fetch
-    const distDir = path.join(appPath, 'dist');
+    // With asar:false, app.getAppPath() returns the real app directory.
+    // With asar:true,  app.getAppPath() returns the .asar path but Node's fs can still read it.
+    const distDir = path.join(app.getAppPath(), 'dist');
 
-    protocol.handle('app', async (request) => {
+    const MIME = {
+      '.html': 'text/html; charset=utf-8',
+      '.js':   'application/javascript',
+      '.mjs':  'application/javascript',
+      '.css':  'text/css',
+      '.png':  'image/png',
+      '.jpg':  'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.svg':  'image/svg+xml',
+      '.ico':  'image/x-icon',
+      '.json': 'application/json',
+      '.woff2':'font/woff2',
+      '.woff': 'font/woff',
+      '.ttf':  'font/ttf',
+      '.webp': 'image/webp',
+    };
+
+    const readFile = (p) => {
+      try { return fs.readFileSync(p); } catch { return null; }
+    };
+
+    protocol.handle('app', (request) => {
       const url = new URL(request.url);
-      // Strip leading slash, default to index.html for SPA root
       const relPath = url.pathname.replace(/^\//, '') || 'index.html';
-      const filePath = path.join(distDir, relPath);
+      let filePath = path.join(distDir, relPath);
 
-      try {
-        // net.fetch with file:// resolves ASAR virtual paths natively in Electron
-        const response = await net.fetch('file://' + filePath);
-        if (response.ok) return response;
-        // File not found → serve index.html (SPA client-side routing fallback)
-        return net.fetch('file://' + path.join(distDir, 'index.html'));
-      } catch {
-        return net.fetch('file://' + path.join(distDir, 'index.html'));
+      let data = readFile(filePath);
+      if (!data) {
+        // SPA fallback — any unmatched route serves index.html
+        filePath = path.join(distDir, 'index.html');
+        data = readFile(filePath);
       }
+      if (!data) {
+        return new Response('Not found', { status: 404 });
+      }
+      const ext = path.extname(filePath).toLowerCase();
+      return new Response(data, {
+        status: 200,
+        headers: { 'Content-Type': MIME[ext] || 'application/octet-stream' },
+      });
     });
   }
 

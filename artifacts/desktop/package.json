@@ -62,9 +62,9 @@
         "to": "assets"
       }
     ],
+    "asar": false,
     "npmRebuild": true,
     "nodeGypRebuild": false,
-    "asarUnpack": ["dist/**/*"],
     "publish": {
       "provider": "github",
       "owner": "generalizingai",
