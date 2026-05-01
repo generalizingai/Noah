@@ -1,8 +1,7 @@
 const {
   app, BrowserWindow, ipcMain, screen,
   systemPreferences, desktopCapturer, shell,
-  Tray, Menu, nativeImage, globalShortcut, Notification, session,
-  protocol, net
+  Tray, Menu, nativeImage, globalShortcut, Notification, session
 } = require('electron');
 const path = require('path');
 const fs   = require('fs');
@@ -99,23 +98,6 @@ function resolveBackendUrl() {
 }
 const NOAH_BACKEND_URL = resolveBackendUrl();
 
-// ─── Custom app:// protocol (production only) ────────────────────────────────
-// Firebase OAuth requires the window to have a valid origin (hostname).
-// file:// gives origin=null which Firebase rejects.
-// We register app:// as a privileged standard scheme so location.hostname='localhost'
-// which Firebase already whitelists by default.
-// MUST be called synchronously before app.whenReady().
-protocol.registerSchemesAsPrivileged([{
-  scheme: 'app',
-  privileges: {
-    standard: true,        // enables hostname-based security model
-    secure: true,          // treated as https — allows Service Workers, etc.
-    supportFetchAPI: true, // fetch() works inside the window
-    corsEnabled: true,     // cross-origin requests allowed
-    stream: true,          // enables streaming responses
-  },
-}]);
-
 let mainWindow = null;
 let floatingBar = null;
 let tray = null;
@@ -155,11 +137,7 @@ function createMainWindow() {
       mainWindow.loadFile(distMain);
     });
   } else {
-    // Production: load via app:// custom scheme so location.hostname='localhost'
-    // which Firebase whitelists for OAuth popups. Falls back to file:// if needed.
-    mainWindow.loadURL('app://localhost/').catch(() => {
-      mainWindow.loadFile(distMain);
-    });
+    mainWindow.loadFile(distMain);
   }
 
   // Allow Firebase auth popup windows (Google sign-in)
@@ -217,9 +195,7 @@ function createFloatingBar() {
       floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
     });
   } else {
-    floatingBar.loadURL('app://localhost/#/floating-bar').catch(() => {
-      floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
-    });
+    floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
   }
 
   floatingBar.setAlwaysOnTop(true, 'screen-saver');
@@ -739,58 +715,6 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
     return ['microphone', 'media', 'audioCapture', 'mediakeysystem'].includes(permission);
   });
-
-  // Register app:// protocol handler (production only).
-  // This gives the window location.hostname='localhost' which Firebase whitelists for OAuth.
-  // Uses fs.readFileSync — Node.js's fs is ASAR-patched by Electron, so this works
-  // whether or not asar is enabled in the build.
-  if (app.isPackaged) {
-    // With asar:false, app.getAppPath() returns the real app directory.
-    // With asar:true,  app.getAppPath() returns the .asar path but Node's fs can still read it.
-    const distDir = path.join(app.getAppPath(), 'dist');
-
-    const MIME = {
-      '.html': 'text/html; charset=utf-8',
-      '.js':   'application/javascript',
-      '.mjs':  'application/javascript',
-      '.css':  'text/css',
-      '.png':  'image/png',
-      '.jpg':  'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.svg':  'image/svg+xml',
-      '.ico':  'image/x-icon',
-      '.json': 'application/json',
-      '.woff2':'font/woff2',
-      '.woff': 'font/woff',
-      '.ttf':  'font/ttf',
-      '.webp': 'image/webp',
-    };
-
-    const readFile = (p) => {
-      try { return fs.readFileSync(p); } catch { return null; }
-    };
-
-    protocol.handle('app', (request) => {
-      const url = new URL(request.url);
-      const relPath = url.pathname.replace(/^\//, '') || 'index.html';
-      let filePath = path.join(distDir, relPath);
-
-      let data = readFile(filePath);
-      if (!data) {
-        // SPA fallback — any unmatched route serves index.html
-        filePath = path.join(distDir, 'index.html');
-        data = readFile(filePath);
-      }
-      if (!data) {
-        return new Response('Not found', { status: 404 });
-      }
-      const ext = path.extname(filePath).toLowerCase();
-      return new Response(data, {
-        status: 200,
-        headers: { 'Content-Type': MIME[ext] || 'application/octet-stream' },
-      });
-    });
-  }
 
   createMainWindow();
   createFloatingBar();

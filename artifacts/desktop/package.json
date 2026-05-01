@@ -62,7 +62,6 @@
         "to": "assets"
       }
     ],
-    "asar": false,
     "npmRebuild": true,
     "nodeGypRebuild": false,
     "publish": {
