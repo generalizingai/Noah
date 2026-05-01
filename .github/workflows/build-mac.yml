@@ -93,7 +93,18 @@ jobs:
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           npm run release
 
-      # ── 7. Confirm ─────────────────────────────────────────────────────────
+      # ── 7. Clean release notes (remove Replit commit metadata) ────────────
+      - name: Set clean release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_VERSION#noah-v}"
+          gh release edit "${{ github.ref_name }}" \
+            --title "Noah $VERSION" \
+            --notes "Noah Desktop App v${VERSION} for macOS (Apple Silicon + Intel)"
+
+      # ── 8. Confirm ─────────────────────────────────────────────────────────
       - name: List release artifacts
         working-directory: artifacts/desktop/dist
         run: ls -lh *.dmg *.zip latest-mac.yml 2>/dev/null || true
