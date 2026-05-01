@@ -1,11 +1,11 @@
 const {
   app, BrowserWindow, ipcMain, screen,
   systemPreferences, desktopCapturer, shell,
-  Tray, Menu, nativeImage, globalShortcut, Notification, session
+  Tray, Menu, nativeImage, globalShortcut, Notification, session,
+  protocol, net
 } = require('electron');
 const path = require('path');
 const fs   = require('fs');
-const http  = require('http');
 const https = require('https');
 const { exec } = require('child_process');
 const os   = require('os');
@@ -99,44 +99,22 @@ function resolveBackendUrl() {
 }
 const NOAH_BACKEND_URL = resolveBackendUrl();
 
-// ─── Local file server (production only) ──────────────────────────────────────
-// Firebase OAuth requires an http:// origin. In production the app loads from
-// file:// which Firebase rejects. We spin up a tiny localhost server so the
-// renderer has an http://127.0.0.1:PORT origin that Firebase already whitelists.
-let _localServer = null;
-let _localServerUrl = null;
-
-function startLocalFileServer(distDir) {
-  return new Promise((resolve) => {
-    const MIME = {
-      '.html': 'text/html', '.js': 'application/javascript',
-      '.css': 'text/css',   '.png': 'image/png',
-      '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
-      '.json': 'application/json', '.woff2': 'font/woff2',
-      '.woff': 'font/woff', '.ttf': 'font/ttf',
-    };
-    _localServer = http.createServer((req, res) => {
-      // strip query string
-      const urlPath = req.url.split('?')[0];
-      let filePath = path.join(distDir, urlPath === '/' ? 'index.html' : urlPath);
-      if (!fs.existsSync(filePath)) filePath = path.join(distDir, 'index.html');
-      try {
-        const data = fs.readFileSync(filePath);
-        const ext  = path.extname(filePath).toLowerCase();
-        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-        res.end(data);
-      } catch (err) {
-        console.error('[LocalServer] 404:', filePath, err.message);
-        res.writeHead(404); res.end('Not found');
-      }
-    });
-    _localServer.listen(0, '127.0.0.1', () => {
-      // Use 'localhost' in the URL — Firebase whitelists 'localhost' by default
-      _localServerUrl = `http://localhost:${_localServer.address().port}`;
-      resolve(_localServerUrl);
-    });
-  });
-}
+// ─── Custom app:// protocol (production only) ────────────────────────────────
+// Firebase OAuth requires the window to have a valid origin (hostname).
+// file:// gives origin=null which Firebase rejects.
+// We register app:// as a privileged standard scheme so location.hostname='localhost'
+// which Firebase already whitelists by default.
+// MUST be called synchronously before app.whenReady().
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'app',
+  privileges: {
+    standard: true,        // enables hostname-based security model
+    secure: true,          // treated as https — allows Service Workers, etc.
+    supportFetchAPI: true, // fetch() works inside the window
+    corsEnabled: true,     // cross-origin requests allowed
+    stream: true,          // enables streaming responses
+  },
+}]);
 
 let mainWindow = null;
 let floatingBar = null;
@@ -176,11 +154,12 @@ function createMainWindow() {
     mainWindow.loadURL(VITE_URL + '/').catch(() => {
       mainWindow.loadFile(distMain);
     });
-  } else if (_localServerUrl) {
-    // Production: serve from localhost so Firebase OAuth works (file:// origin is blocked)
-    mainWindow.loadURL(_localServerUrl + '/');
   } else {
-    mainWindow.loadFile(distMain);
+    // Production: load via app:// custom scheme so location.hostname='localhost'
+    // which Firebase whitelists for OAuth popups. Falls back to file:// if needed.
+    mainWindow.loadURL('app://localhost/').catch(() => {
+      mainWindow.loadFile(distMain);
+    });
   }
 
   // Allow Firebase auth popup windows (Google sign-in)
@@ -237,10 +216,10 @@ function createFloatingBar() {
     floatingBar.loadURL(VITE_URL + '/floating-bar').catch(() => {
       floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
     });
-  } else if (_localServerUrl) {
-    floatingBar.loadURL(_localServerUrl + '/#/floating-bar');
   } else {
-    floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
+    floatingBar.loadURL('app://localhost/#/floating-bar').catch(() => {
+      floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
+    });
   }
 
   floatingBar.setAlwaysOnTop(true, 'screen-saver');
@@ -761,24 +740,31 @@ app.whenReady().then(async () => {
     return ['microphone', 'media', 'audioCapture', 'mediakeysystem'].includes(permission);
   });
 
-  // Start local file server in production so Firebase OAuth works
-  // (file:// origin is blocked by Firebase; localhost is whitelisted by default)
+  // Register app:// protocol handler (production only).
+  // This gives the window location.hostname='localhost' which Firebase whitelists for OAuth.
+  // net.fetch('file://...') is used internally — Electron resolves ASAR paths automatically.
   if (app.isPackaged) {
-    // Try several candidate paths in priority order:
-    //  1. asarUnpack path  — real files (current build with asarUnpack config)
-    //  2. app.asar virtual — Electron's patched fs can read these too
-    //  3. __dirname-relative — last resort
     const appPath = app.getAppPath();
-    const candidates = [
-      path.join(process.resourcesPath, 'app.asar.unpacked', 'dist'),
-      path.join(appPath.replace(/app\.asar$/, ''), 'app.asar.unpacked', 'dist'),
-      path.join(appPath, 'dist'),
-      path.join(__dirname, '../dist'),
-    ];
-    const distDir = candidates.find(p => {
-      try { return fs.existsSync(path.join(p, 'index.html')); } catch { return false; }
-    }) || candidates[2]; // fallback to ASAR path even if existsSync lied
-    await startLocalFileServer(distDir);
+    // dist/ is either inside app.asar (Electron's fs patches handle it)
+    // or in app.asar.unpacked/ if asarUnpack is set — both work via net.fetch
+    const distDir = path.join(appPath, 'dist');
+
+    protocol.handle('app', async (request) => {
+      const url = new URL(request.url);
+      // Strip leading slash, default to index.html for SPA root
+      const relPath = url.pathname.replace(/^\//, '') || 'index.html';
+      const filePath = path.join(distDir, relPath);
+
+      try {
+        // net.fetch with file:// resolves ASAR virtual paths natively in Electron
+        const response = await net.fetch('file://' + filePath);
+        if (response.ok) return response;
+        // File not found → serve index.html (SPA client-side routing fallback)
+        return net.fetch('file://' + path.join(distDir, 'index.html'));
+      } catch {
+        return net.fetch('file://' + path.join(distDir, 'index.html'));
+      }
+    });
   }
 
   createMainWindow();
@@ -897,5 +883,4 @@ app.on('before-quit', () => {
   if (uIOhook)  { try { uIOhook.stop(); } catch {} }
   globalShortcut.unregisterAll();
   if (tray) tray.destroy();
-  if (_localServer) { try { _localServer.close(); } catch {} }
 });
