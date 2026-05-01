@@ -2,11 +2,23 @@ import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
+// Electron loads the app from file:// — crossorigin attributes on scripts/links
+// cause the browser to attempt CORS checks that file:// cannot satisfy, resulting
+// in a completely blank window. Strip them from the generated HTML at build time.
+function removeElectronCrossOrigin() {
+  return {
+    name: 'remove-electron-crossorigin',
+    transformIndexHtml(html) {
+      return html.replace(/ crossorigin(?:="[^"]*")?/g, '');
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
 
   return {
-    plugins: [react()],
+    plugins: [react(), removeElectronCrossOrigin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
