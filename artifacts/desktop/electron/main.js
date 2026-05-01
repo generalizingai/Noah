@@ -112,6 +112,82 @@ let currentPTTKeycode = 56;          // default: Option (⌥) — safe, no typin
 let currentPTTLabel   = '⌥';
 let pttCapturing      = false;       // true while settings "Change" is active
 
+// ─── Local HTTP server for production UI ─────────────────────────────────────
+// Serving the bundled app over http://127.0.0.1 instead of file:// avoids every
+// known Electron/Chromium file:// quirk: crossorigin module failures, CSP
+// restrictions on null-origin, and ES module loading regressions in Electron 31+.
+
+let uiServer   = null;
+let uiPort     = 0;
+
+const MIME_TYPES = {
+  '.html':  'text/html; charset=utf-8',
+  '.js':    'application/javascript; charset=utf-8',
+  '.mjs':   'application/javascript; charset=utf-8',
+  '.css':   'text/css; charset=utf-8',
+  '.json':  'application/json; charset=utf-8',
+  '.png':   'image/png',
+  '.jpg':   'image/jpeg',
+  '.jpeg':  'image/jpeg',
+  '.svg':   'image/svg+xml',
+  '.ico':   'image/x-icon',
+  '.woff':  'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf':   'font/ttf',
+  '.webp':  'image/webp',
+};
+
+function startUIServer() {
+  return new Promise((resolve, reject) => {
+    const distDir = path.join(__dirname, '../dist');
+
+    uiServer = http.createServer((req, res) => {
+      // Strip query string; decode URL-encoded chars
+      let pathname;
+      try { pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname); }
+      catch { pathname = '/'; }
+
+      // Normalise: root → index.html, strip leading slash
+      if (pathname === '/') pathname = '/index.html';
+      const relative = pathname.replace(/^\//, '');
+      const filePath = path.join(distDir, relative);
+
+      // Security: never escape outside dist/
+      if (!filePath.startsWith(distDir)) {
+        res.writeHead(403); res.end('Forbidden'); return;
+      }
+
+      try {
+        const data = fs.readFileSync(filePath);
+        const ext  = path.extname(filePath).toLowerCase();
+        res.writeHead(200, {
+          'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+          // No caching — the app is local, stale files are confusing
+          'Cache-Control': 'no-store',
+        });
+        res.end(data);
+      } catch {
+        // SPA fallback: any path that isn't a real file → index.html
+        try {
+          const html = fs.readFileSync(path.join(distDir, 'index.html'));
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(html);
+        } catch (err2) {
+          res.writeHead(500); res.end(`Server error: ${err2.message}`);
+        }
+      }
+    });
+
+    // Port 0 → OS picks an available port
+    uiServer.listen(0, '127.0.0.1', () => {
+      uiPort = uiServer.address().port;
+      console.log(`[Noah] UI server listening on http://127.0.0.1:${uiPort}`);
+      resolve(uiPort);
+    });
+    uiServer.on('error', reject);
+  });
+}
+
 // ─── Window creation ──────────────────────────────────────────────────────────
 
 function createMainWindow() {
@@ -131,14 +207,18 @@ function createMainWindow() {
     },
   });
 
-  const distMain = path.join(__dirname, '../dist/index.html');
   const isRemoteUI = !VITE_URL.includes('localhost') && !VITE_URL.includes('127.0.0.1');
-  if (isDev || isRemoteUI) {
+  if (isDev) {
+    // Development: Vite dev server
     mainWindow.loadURL(VITE_URL + '/').catch(() => {
-      mainWindow.loadFile(distMain);
+      mainWindow.loadURL(`http://127.0.0.1:${uiPort}/`);
     });
+  } else if (isRemoteUI) {
+    // Remote URL override (e.g. ~/.noahrc uiUrl)
+    mainWindow.loadURL(VITE_URL + '/');
   } else {
-    mainWindow.loadFile(distMain);
+    // Production: local HTTP server serving dist/
+    mainWindow.loadURL(`http://127.0.0.1:${uiPort}/`);
   }
 
   // Allow Firebase auth popup windows (Google sign-in)
@@ -189,14 +269,15 @@ function createFloatingBar() {
     },
   });
 
-  const distIndex = path.join(__dirname, '../dist/index.html');
   const isRemoteUIBar = !VITE_URL.includes('localhost') && !VITE_URL.includes('127.0.0.1');
-  if (isDev || isRemoteUIBar) {
+  if (isDev) {
     floatingBar.loadURL(VITE_URL + '/floating-bar').catch(() => {
-      floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
+      floatingBar.loadURL(`http://127.0.0.1:${uiPort}/#/floating-bar`);
     });
+  } else if (isRemoteUIBar) {
+    floatingBar.loadURL(VITE_URL + '/floating-bar');
   } else {
-    floatingBar.loadFile(distIndex, { hash: '/floating-bar' });
+    floatingBar.loadURL(`http://127.0.0.1:${uiPort}/#/floating-bar`);
   }
 
   floatingBar.setAlwaysOnTop(true, 'screen-saver');
@@ -717,6 +798,17 @@ app.whenReady().then(async () => {
     return ['microphone', 'media', 'audioCapture', 'mediakeysystem'].includes(permission);
   });
 
+  // ── Start local UI server for production (serves dist/ over HTTP) ──────────
+  if (!isDev) {
+    try {
+      await startUIServer();
+    } catch (err) {
+      console.error('[Noah] UI server failed to start:', err);
+      // Fall back: try a fixed port
+      uiPort = 14159;
+    }
+  }
+
   createMainWindow();
   createFloatingBar();
   createTray();
@@ -833,4 +925,5 @@ app.on('before-quit', () => {
   if (uIOhook)  { try { uIOhook.stop(); } catch {} }
   globalShortcut.unregisterAll();
   if (tray) tray.destroy();
+  if (uiServer) { try { uiServer.close(); } catch {} }
 });

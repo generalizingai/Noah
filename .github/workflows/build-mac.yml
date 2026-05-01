@@ -98,6 +98,7 @@ jobs:
         run: |
           VERSION="${RELEASE_VERSION#noah-v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npx vite build
           npx electron-builder --mac --publish never
 
       # ── 7. Confirm build output ─────────────────────────────────────────────
