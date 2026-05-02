@@ -40,11 +40,18 @@ if (typeof window !== 'undefined' && window.electronAPI?.getBackendUrl) {
 
 export async function checkHermesStatus() {
   try {
-    const response = await fetch(`${NOAH_BACKEND_URL}/hermes/status`, {
+    const response = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/status`, {
       method: 'GET',
       headers: getByokHeaders(),
+      signal: AbortSignal.timeout(10000), // 10 second timeout
     });
-    return response.ok;
+
+    // Check if response is actually OK and has valid content
+    if (!response.ok) return false;
+
+    // Try to parse response to ensure endpoint is working
+    const data = await response.json().catch(() => ({}));
+    return data.status === 'online' || data.online || response.ok;
   } catch {
     return false;
   }
@@ -53,14 +60,25 @@ export async function checkHermesStatus() {
 export async function getHermesBrainMode() {
   try {
     const localMode = localStorage.getItem('noah_brain_mode');
-    if (localMode === 'hermes') return 'hermes';
 
+    // If locally set to hermes, verify it's still online
+    if (localMode === 'hermes') {
+      const isStillOnline = await checkHermesStatus();
+      if (isStillOnline) return 'hermes';
+      // If was set to hermes but now offline, clear it
+      localStorage.setItem('noah_brain_mode', 'classic');
+      return 'classic';
+    }
+
+    // Check if Hermes is available and switch to it
     const isHermesOnline = await checkHermesStatus();
     if (isHermesOnline) {
       localStorage.setItem('noah_brain_mode', 'hermes');
       return 'hermes';
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[Noah] Error checking Hermes status:', err.message);
+  }
   return 'classic';
 }
 
@@ -799,8 +817,16 @@ export async function getHermesSessionHistory(sessionId, token) {
 // history: array of { role: 'user'|'assistant', content: string } from previous turns
 export async function sendVoiceQuery(transcript, screenBase64, token, onAction, history = []) {
   // ── Hermes brain mode: route to backend Hermes engine ──────────────────────
-  if (getHermesBrainMode() === 'hermes') {
-    return sendHermesQuery(transcript, screenBase64, token, onAction, history);
+  const brainMode = await getHermesBrainMode();
+  if (brainMode === 'hermes') {
+    try {
+      return await sendHermesQuery(transcript, screenBase64, token, onAction, history);
+    } catch (err) {
+      console.error('[Noah] Hermes query failed:', err.message);
+      // If Hermes fails, fall back to classic mode with a helpful error message
+      onAction?.({ type: 'hermes', label: 'Hermes error', status: 'error' });
+      throw new Error(`Hermes unavailable: ${err.message}. Please check your network connection or try switching back to Classic mode.`);
+    }
   }
 
   const key = getOpenAIKey();
