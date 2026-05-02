@@ -145,9 +145,10 @@ export default function AssistantTab({ messages, setMessages }) {
   const [speakerOn,      setSpeakerOn]    = useState(isTTSAvailable());
   const [currentAction,  setCurrentAction] = useState(null);
   const [screenWatchOn,  setScreenWatchOn] = useState(false);
-  const [pttKeyLabel,    setPttKeyLabel]  = useState(getPTTKeyLabel());
+  const [pttKeyLabel,    setPttKeyLabel]  = useState('');
   const [savedFlash,     setSavedFlash]   = useState(false);
   const [showHistory,    setShowHistory]  = useState(false);
+  const [isHermesMode,   setIsHermesMode]  = useState(false);
   const [historySessions, setHistorySessions] = useState([]);
   const [historyLoading, setHistoryLoading]   = useState(false);
   const [historyError,   setHistoryError]     = useState(null);
@@ -249,11 +250,16 @@ export default function AssistantTab({ messages, setMessages }) {
 
   // ── PTT ──────────────────────────────────────────────────────────────────────
   useEffect(() => {
-    setPttKeyLabel(getPTTKeyLabel());
-    const mgr = new PTTManager(startListening, stopListening);
-    mgr.start();
-    pttRef.current = mgr;
-    return () => mgr.stop();
+    try {
+      setPttKeyLabel(getPTTKeyLabel());
+      const mgr = new PTTManager(startListening, stopListening);
+      mgr.start();
+      pttRef.current = mgr;
+      return () => mgr.stop();
+    } catch (err) {
+      console.error('[Noah] PTT initialization failed:', err);
+      // Don't crash the app if PTT fails to initialize
+    }
   }, [startListening, stopListening]);
 
   // Load Hermes brain mode on component mount

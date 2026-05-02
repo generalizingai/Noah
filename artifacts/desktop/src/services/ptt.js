@@ -35,6 +35,7 @@ export function getPTTKeyCode() {
 // Prefer uiohook label if set, fall back to accelerator label
 export function getPTTKeyLabel() {
   try {
+    if (typeof window === 'undefined' || !window.localStorage) return DEFAULT_KEY_LABEL;
     const kc = localStorage.getItem(KEYCODE_LABEL_KEY);
     if (kc) return kc;
     return localStorage.getItem(STORAGE_KEY + '_label') || DEFAULT_KEY_LABEL;

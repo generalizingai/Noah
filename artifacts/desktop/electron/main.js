@@ -2,23 +2,38 @@ const {
   app, BrowserWindow, ipcMain, screen,
   systemPreferences, desktopCapturer, shell,
   Tray, Menu, nativeImage, globalShortcut, Notification, session,
-  protocol, net,
+  net,
 } = require('electron');
+
+// Import protocol if available (newer Electron versions)
+let protocol;
+try {
+  protocol = require('electron').protocol;
+} catch (err) {
+  console.warn('[Noah] Could not import protocol module:', err.message);
+}
 
 // ── Custom app:// protocol ─────────────────────────────────────────────────────
 // MUST be called synchronously before app.ready (before app.whenReady resolves).
 // This registers "app" as a standard secure scheme, giving windows loaded from
 // app://localhost a real origin so Firebase Google sign-in works correctly.
 // (file:// has a null origin that Firebase and OAuth providers reject.)
-protocol.registerSchemesAsPrivileged([{
-  scheme: 'app',
-  privileges: {
-    standard: true,       // behaves like https (relative URLs, cookies, storage)
-    secure: true,         // treated as secure context (getUserMedia, etc.)
-    supportFetchAPI: true,
-    corsEnabled: false,   // no CORS preflight — all same-origin locally
-  },
-}]);
+if (protocol.registerSchemesAsPrivileged) {
+  protocol.registerSchemesAsPrivileged([{
+    scheme: 'app',
+    privileges: {
+      standard: true,       // behaves like https (relative URLs, cookies, storage)
+      secure: true,         // treated as secure context (getUserMedia, etc.)
+      supportFetchAPI: true,
+      corsEnabled: false,   // no CORS preflight — all same-origin locally
+    },
+  }]);
+} else {
+  console.warn('[Noah] protocol.registerSchemesAsPrivileged not available - using fallback');
+  if (protocol.registerServiceWorkerSchemes) {
+    protocol.registerServiceWorkerSchemes(['app']);
+  }
+}
 const path = require('path');
 const fs   = require('fs');
 const http  = require('http');
