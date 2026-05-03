@@ -123,21 +123,20 @@ export async function getHermesBrainMode() {
   try {
     const localMode = localStorage.getItem('noah_brain_mode');
 
-    // If locally set to hermes, verify it's still online
+    // Respect explicit user choice first.
+    if (localMode === 'classic') return 'classic';
+
+    // If explicitly set to Hermes, verify reachability.
     if (localMode === 'hermes') {
       const isStillOnline = await checkHermesStatus();
       if (isStillOnline) return 'hermes';
-      // If was set to hermes but now offline, clear it
+      // If Hermes is selected but unavailable, fall back safely.
       localStorage.setItem('noah_brain_mode', 'classic');
       return 'classic';
     }
 
-    // Check if Hermes is available and switch to it
-    const isHermesOnline = await checkHermesStatus();
-    if (isHermesOnline) {
-      localStorage.setItem('noah_brain_mode', 'hermes');
-      return 'hermes';
-    }
+    // First-run default: classic unless user explicitly selected Hermes.
+    return 'classic';
   } catch (err) {
     console.warn('[Noah] Error checking Hermes status:', err.message);
   }
