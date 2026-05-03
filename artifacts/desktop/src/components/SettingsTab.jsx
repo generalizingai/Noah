@@ -8,7 +8,7 @@ import {
   getVoiceModel, saveVoiceModel, getSystemInstructions, saveSystemInstructions,
   getIntegrations, saveAllIntegrations, getIntegrationToken,
 } from '../services/keys';
-import { getHermesBrainMode, setHermesBrainMode, checkHermesStatus, getHermesModel, setHermesModel, getRequireToolApproval, setRequireToolApproval } from '../services/noahApi';
+import { getHermesBrainMode, setHermesBrainMode, getHermesBackendStatus, getHermesModel, setHermesModel, getRequireToolApproval, setRequireToolApproval } from '../services/noahApi';
 import {
   Setting06Icon, Mic01Icon, GearsIcon, ShieldKeyIcon,
   CheckmarkCircle01Icon, Cancel01Icon, EyeIcon, KeyboardIcon,
@@ -814,6 +814,7 @@ function ToolApprovalToggleRow() {
 function BrainModeRow() {
   const [mode,         setMode]         = useState(getHermesBrainMode);
   const [status,       setStatus]       = useState(null);
+  const [statusInfo,   setStatusInfo]   = useState(null);
   const [checking,     setChecking]     = useState(false);
   const [saved,        setSaved]        = useState(false);
   const [model,        setModel]        = useState(getHermesModel);
@@ -828,8 +829,9 @@ function BrainModeRow() {
 
   const check = async () => {
     setChecking(true);
-    const s = await checkHermesStatus();
-    setStatus(s);
+    const info = await getHermesBackendStatus();
+    setStatus(!!info.active);
+    setStatusInfo(info);
     setChecking(false);
   };
 
@@ -1090,7 +1092,9 @@ function BrainModeRow() {
               <div className="flex items-center gap-2">
                 <span className="text-[10px] text-white/40">Backend status:</span>
                 {hermesBadge}
-                <span className="text-[10px] font-mono text-indigo-300/60">{model}</span>
+                <span className="text-[10px] font-mono text-indigo-300/60">
+                  {statusInfo?.model || model}
+                </span>
               </div>
               <button
                 onClick={check}
@@ -1100,6 +1104,17 @@ function BrainModeRow() {
                 {checking ? 'Checking…' : 'Refresh'}
               </button>
             </div>
+            {statusInfo?.reachable && !statusInfo?.active && (
+              <p className="text-[10px] text-amber-300/75 leading-relaxed">
+                Backend is reachable at <span className="font-mono">{statusInfo.base}</span> but Hermes mode is disabled on server.
+                Set <span className="font-mono">NOAH_BRAIN_MODE=hermes</span> in Railway.
+              </p>
+            )}
+            {!statusInfo?.reachable && (
+              <p className="text-[10px] text-red-300/75 leading-relaxed">
+                Could not reach backend URL. Check your <span className="font-mono">~/.noahrc backendUrl</span> or Railway deployment URL.
+              </p>
+            )}
           </div>
         )}
 

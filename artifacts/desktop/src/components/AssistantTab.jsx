@@ -94,6 +94,7 @@ function StreamingCursor() {
 function Message({ msg, isLast, isSpeaking }) {
   const isAssistant = msg.role === 'assistant';
   const fmt = (d) => (d instanceof Date ? d : new Date(d)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const content = typeof msg.content === 'string' ? msg.content : String(msg.content || '');
   return (
     <div className={`flex gap-3 slide-up ${isAssistant ? 'justify-start' : 'justify-end'}`}>
       {isAssistant && (
@@ -102,9 +103,11 @@ function Message({ msg, isLast, isSpeaking }) {
       <div className={`max-w-[78%] flex flex-col gap-1 ${isAssistant ? 'items-start' : 'items-end'}`}>
         <div
           className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${isAssistant ? 'msg-noah' : 'msg-user'}`}
-          style={isAssistant ? { borderTopLeftRadius: 4 } : { borderTopRightRadius: 4 }}
+          style={isAssistant
+            ? { borderTopLeftRadius: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
+            : { borderTopRightRadius: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
         >
-          {msg.content}
+          {content}
           {msg.streaming && <StreamingCursor />}
         </div>
         <span className="text-[10px] text-white/22">{fmt(msg.time)}</span>
@@ -154,7 +157,7 @@ export default function AssistantTab({ messages, setMessages }) {
     if (isTTSAvailable() && !speakerOn) {
       setSpeakerOn(true);
     }
-  }, [isTTSAvailable()]);
+  }, [speakerOn]);
   const [currentAction,  setCurrentAction] = useState(null);
   const [screenWatchOn,  setScreenWatchOn] = useState(false);
   const [screenCaptureStatus, setScreenCaptureStatus] = useState('idle'); // idle, capturing, error
@@ -664,6 +667,17 @@ export default function AssistantTab({ messages, setMessages }) {
               style={isSpeakingState ? { borderColor: 'rgba(22,163,74,0.5)', color: '#4ade80', background: 'rgba(22,163,74,0.12)' } : {}}>
               {speakerOn ? <VolumeHighIcon size={14} strokeWidth={1.8} /> : <VolumeLowIcon size={14} strokeWidth={1.8} />}
             </button>
+            {/* Stop speaking */}
+            {isSpeakingState && (
+              <button
+                onClick={() => { stopSpeaking(); setIsSpeakingState(false); }}
+                className="btn-ghost px-2.5 py-1 text-[11px]"
+                style={{ color: '#f87171', borderColor: 'rgba(239,68,68,0.28)', background: 'rgba(239,68,68,0.07)' }}
+                title="Stop voice"
+              >
+                Stop
+              </button>
+            )}
           </>
         )}
       </div>
@@ -771,7 +785,7 @@ export default function AssistantTab({ messages, setMessages }) {
                 </div>
                 <span className="text-xs text-green-400">Noah is speaking</span>
                 <button onClick={() => { stopSpeaking(); setIsSpeakingState(false); }}
-                  className="text-[10px] underline text-white/28 hover:text-white/55 transition-colors">stop</button>
+                  className="text-[11px] text-red-400/90 hover:text-red-300 transition-colors">Stop</button>
               </div>
             )}
             <div ref={bottomRef} />

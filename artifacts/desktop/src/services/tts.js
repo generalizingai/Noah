@@ -1,6 +1,21 @@
 import { getDeepgramKey, getIntegrationToken, getVoiceModel } from './keys';
 
 let currentAudio = null;
+const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
+
+function base64ToBlob(base64, mimeType = 'audio/mpeg') {
+  const bytes = atob(base64);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  return new Blob([arr], { type: mimeType });
+}
+
+function normalizeElevenVoiceId(voiceId) {
+  const candidate = (voiceId || '').trim();
+  // Prevent passing Deepgram model IDs (e.g. aura-asteria-en) as ElevenLabs voice IDs.
+  if (!candidate || candidate.startsWith('aura-')) return '21m00Tcm4TlvDq8ikWAM';
+  return candidate;
+}
 
 // ─── Provider detection ───────────────────────────────────────────────────────
 
@@ -34,25 +49,46 @@ export function isSpeaking() {
 // ─── ElevenLabs TTS ───────────────────────────────────────────────────────────
 
 async function speakElevenLabs(text, voiceId, apiKey, onStart, onEnd) {
-  const vid = voiceId || '21m00Tcm4TlvDq8ikWAM'; // Rachel (default)
+  const vid = normalizeElevenVoiceId(voiceId);
+  const payload = {
+    text,
+    model_id: 'eleven_turbo_v2_5',
+    voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.35, use_speaker_boost: true },
+  };
 
-  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${vid}`, {
-    method: 'POST',
-    headers: {
-      'xi-api-key':   apiKey,
-      'Content-Type': 'application/json',
-      'Accept':       'audio/mpeg',
-    },
-    body: JSON.stringify({
-      text,
-      model_id: 'eleven_turbo_v2',
-      voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.35, use_speaker_boost: true },
-    }),
-  });
+  let blob;
+  if (isElectron && window.electronAPI?.synthesizeTTS) {
+    const out = await window.electronAPI.synthesizeTTS({
+      method: 'POST',
+      url: `https://api.elevenlabs.io/v1/text-to-speech/${vid}`,
+      headers: {
+        'xi-api-key': apiKey,
+        'Accept': 'audio/mpeg',
+        'Content-Type': 'application/json',
+      },
+      body: payload,
+    });
+    if (!out?.success) {
+      throw new Error(`ElevenLabs TTS error ${out?.statusCode || ''} ${out?.error || ''}`.trim());
+    }
+    blob = base64ToBlob(out.audioBase64, out.contentType || 'audio/mpeg');
+  } else {
+    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${vid}`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key':   apiKey,
+        'Content-Type': 'application/json',
+        'Accept':       'audio/mpeg',
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const errTxt = await res.text().catch(() => '');
+      throw new Error(`ElevenLabs TTS error ${res.status}${errTxt ? `: ${errTxt.slice(0, 200)}` : ''}`);
+    }
+    blob = await res.blob();
+  }
 
-  if (!res.ok) throw new Error(`ElevenLabs TTS error ${res.status}`);
-
-  const blob  = await res.blob();
   const url   = URL.createObjectURL(blob);
   const audio = new Audio(url);
   currentAudio = audio;
@@ -66,15 +102,31 @@ async function speakElevenLabs(text, voiceId, apiKey, onStart, onEnd) {
 // ─── Deepgram TTS ─────────────────────────────────────────────────────────────
 
 async function speakDeepgram(text, voice, apiKey, onStart, onEnd) {
-  const res = await fetch(`https://api.deepgram.com/v1/speak?model=${voice}`, {
-    method: 'POST',
-    headers: { Authorization: `Token ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
-  });
+  let blob;
+  if (isElectron && window.electronAPI?.synthesizeTTS) {
+    const out = await window.electronAPI.synthesizeTTS({
+      method: 'POST',
+      url: `https://api.deepgram.com/v1/speak?model=${encodeURIComponent(voice)}`,
+      headers: {
+        Authorization: `Token ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: { text },
+    });
+    if (!out?.success) {
+      throw new Error(`Deepgram TTS error ${out?.statusCode || ''} ${out?.error || ''}`.trim());
+    }
+    blob = base64ToBlob(out.audioBase64, out.contentType || 'audio/mpeg');
+  } else {
+    const res = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(voice)}`, {
+      method: 'POST',
+      headers: { Authorization: `Token ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) throw new Error(`Deepgram TTS error ${res.status}`);
+    blob = await res.blob();
+  }
 
-  if (!res.ok) throw new Error(`Deepgram TTS error ${res.status}`);
-
-  const blob  = await res.blob();
   const url   = URL.createObjectURL(blob);
   const audio = new Audio(url);
   currentAudio = audio;

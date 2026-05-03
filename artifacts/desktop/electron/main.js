@@ -128,6 +128,7 @@ const VITE_URL = resolveUIUrl();
 // The API server proxy runs alongside the desktop UI and forwards requests
 // to the Python backend (local dev) or a deployed Railway instance.
 const PRODUCTION_BACKEND_URL = 'https://noah-production-0ef2.up.railway.app';
+const LOCAL_BACKEND_URL = 'http://localhost:8001';
 
 function resolveBackendUrl() {
   if (process.env.NOAH_BACKEND_URL) return process.env.NOAH_BACKEND_URL.replace(/\/$/, '');
@@ -138,6 +139,9 @@ function resolveBackendUrl() {
       if (cfg.backendUrl) return cfg.backendUrl.replace(/\/$/, '');
     }
   } catch {}
+  // Default to hosted backend so packaged desktop builds work out-of-the-box.
+  // Set NOAH_PREFER_LOCAL_BACKEND=1 for local backend-first development.
+  if (process.env.NOAH_PREFER_LOCAL_BACKEND === '1') return LOCAL_BACKEND_URL;
   return PRODUCTION_BACKEND_URL;
 }
 const NOAH_BACKEND_URL = resolveBackendUrl();
@@ -1054,6 +1058,74 @@ ipcMain.handle('http-api-call', async (_, { method, url, headers, body }) => {
 
       req.on('error', err => resolve({ success: false, error: err.message }));
       req.on('timeout', () => { req.destroy(); resolve({ success: false, error: 'Request timed out' }); });
+      if (bodyStr) req.write(bodyStr);
+      req.end();
+    } catch (err) {
+      resolve({ success: false, error: err.message });
+    }
+  });
+});
+
+// ─── IPC: Binary TTS synthesis (bypasses renderer CORS for audio endpoints) ──
+ipcMain.handle('synthesize-tts', async (_, { url, method = 'POST', headers = {}, body = null }) => {
+  return new Promise((resolve) => {
+    try {
+      const parsed = new URL(url);
+      const lib = parsed.protocol === 'https:' ? https : http;
+      const bodyStr = body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null;
+
+      const reqHeaders = {
+        'User-Agent': 'Noah-AI-Assistant/1.0',
+        ...headers,
+      };
+      if (bodyStr) {
+        reqHeaders['Content-Length'] = Buffer.byteLength(bodyStr);
+        if (!reqHeaders['Content-Type']) reqHeaders['Content-Type'] = 'application/json';
+      }
+
+      const options = {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method,
+        headers: reqHeaders,
+        timeout: 25000,
+      };
+
+      const req = lib.request(options, (res) => {
+        const chunks = [];
+        let total = 0;
+        res.on('data', (chunk) => {
+          total += chunk.length;
+          // Guardrail: cap at 15MB audio payload
+          if (total <= 15 * 1024 * 1024) chunks.push(chunk);
+        });
+        res.on('end', () => {
+          const contentType = res.headers['content-type'] || 'audio/mpeg';
+          const raw = Buffer.concat(chunks);
+          if ((res.statusCode || 500) >= 400) {
+            resolve({
+              success: false,
+              statusCode: res.statusCode,
+              error: raw.toString('utf-8').slice(0, 1000) || `TTS request failed (${res.statusCode})`,
+              contentType,
+            });
+            return;
+          }
+          resolve({
+            success: true,
+            statusCode: res.statusCode,
+            contentType,
+            audioBase64: raw.toString('base64'),
+          });
+        });
+      });
+
+      req.on('error', (err) => resolve({ success: false, error: err.message }));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ success: false, error: 'Request timed out' });
+      });
       if (bodyStr) req.write(bodyStr);
       req.end();
     } catch (err) {

@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import ast
 from typing import List, Union, Optional
 from datetime import datetime, timedelta, timezone
 
@@ -8,6 +9,35 @@ import redis
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _decode(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _safe_parse_map(value, default: Optional[dict] = None) -> Optional[dict]:
+    raw = _decode(value)
+    if not raw:
+        return {} if default is None else default
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+        return {} if default is None else default
+    except Exception:
+        pass
+    try:
+        parsed = ast.literal_eval(raw)
+        if isinstance(parsed, dict):
+            return parsed
+        return {} if default is None else default
+    except Exception:
+        logger.warning("Failed to parse Redis map payload")
+        return {} if default is None else default
 
 def _parse_redis_host_port() -> tuple[str, int]:
     """REDIS_DB_HOST may be 'hostname:port' or just 'hostname'. Parse both."""
@@ -129,7 +159,11 @@ def get_app_usage_count_cache(app_id: str) -> int | None:
     count = r.get(f'apps:{app_id}:usage_count')
     if not count:
         return None
-    return eval(count)
+    try:
+        return int(_decode(count))
+    except (TypeError, ValueError):
+        logger.warning("Invalid usage_count cache value for app_id=%s", app_id)
+        return None
 
 
 def set_app_money_made_amount_cache(app_id: str, amount: float):
@@ -140,7 +174,11 @@ def get_app_money_made_amount_cache(app_id: str) -> float | None:
     amount = r.get(f'apps:{app_id}:money_made')
     if not amount:
         return None
-    return eval(amount)
+    try:
+        return float(_decode(amount))
+    except (TypeError, ValueError):
+        logger.warning("Invalid money_made cache value for app_id=%s", app_id)
+        return None
 
 
 def set_app_usage_history_cache(app_id: str, usage: List[dict]):
@@ -173,19 +211,16 @@ def set_app_money_made_cache(app_id: str, money: dict):
 
 def set_app_review_cache(app_id: str, uid: str, data: dict):
     reviews = r.get(f'plugins:{app_id}:reviews')
-    if not reviews:
-        reviews = {}
-    else:
-        reviews = eval(reviews)
+    reviews = _safe_parse_map(reviews, default={})
     reviews[uid] = data
-    r.set(f'plugins:{app_id}:reviews', str(reviews))
+    r.set(f'plugins:{app_id}:reviews', json.dumps(reviews, default=str))
 
 
 def get_specific_user_review(app_id: str, uid: str) -> dict:
     reviews = r.get(f'plugins:{app_id}:reviews')
     if not reviews:
         return {}
-    reviews = eval(reviews)
+    reviews = _safe_parse_map(reviews, default={})
     return reviews.get(uid, {})
 
 
@@ -236,7 +271,7 @@ def get_app_reviews(app_id: str) -> dict:
     reviews = r.get(f'plugins:{app_id}:reviews')
     if not reviews:
         return {}
-    return eval(reviews)
+    return _safe_parse_map(reviews, default={})
 
 
 def get_apps_reviews(app_ids: list) -> dict:
@@ -247,7 +282,7 @@ def get_apps_reviews(app_ids: list) -> dict:
     reviews = r.mget(keys)
     if reviews is None:
         return {}
-    return {app_id: eval(review) if review else {} for app_id, review in zip(app_ids, reviews)}
+    return {app_id: _safe_parse_map(review, default={}) if review else {} for app_id, review in zip(app_ids, reviews)}
 
 
 def set_app_installs_count(app_id: str, count: int):
@@ -291,7 +326,7 @@ def get_cached_signed_url(blob_path: str) -> str:
 
 
 def cache_user_geolocation(uid: str, geolocation: dict):
-    r.set(f'users:{uid}:geolocation', str(geolocation))
+    r.set(f'users:{uid}:geolocation', json.dumps(geolocation, default=str))
     r.expire(f'users:{uid}:geolocation', 60 * 30)  # FIXME: too much?
 
 
@@ -299,7 +334,7 @@ def get_cached_user_geolocation(uid: str):
     geolocation = r.get(f'users:{uid}:geolocation')
     if not geolocation:
         return None
-    return eval(geolocation)
+    return _safe_parse_map(geolocation, default=None)
 
 
 # VISIIBILTIY OF CONVERSATIONS

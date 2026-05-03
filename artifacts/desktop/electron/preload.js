@@ -68,6 +68,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Network (bypasses browser CORS)
   fetchUrl:           (url)       => ipcRenderer.invoke('fetch-url', url),
   httpApiCall:        (opts)      => ipcRenderer.invoke('http-api-call', opts),
+  synthesizeTTS:      (opts)      => ipcRenderer.invoke('synthesize-tts', opts),
 
   // Brain mode IPC signal — notifies main process of Classic/Hermes mode change
   setBrainMode:       (mode)      => ipcRenderer.invoke('set-brain-mode', mode),

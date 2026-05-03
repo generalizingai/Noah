@@ -30,7 +30,9 @@ function backendHeaders(token, extra = {}) {
 // The IPC call resolves asynchronously at startup and updates the module-level
 // variable before any real user request is made.
 
-let NOAH_BACKEND_URL = import.meta.env.VITE_NOAH_BACKEND_URL || 'https://noah-production-0ef2.up.railway.app';
+const LOCAL_BACKEND_URL = 'http://localhost:8001';
+const PRODUCTION_BACKEND_URL = 'https://noah-production-0ef2.up.railway.app';
+let NOAH_BACKEND_URL = import.meta.env.VITE_NOAH_BACKEND_URL || PRODUCTION_BACKEND_URL;
 
 if (typeof window !== 'undefined' && window.electronAPI?.getBackendUrl) {
   window.electronAPI.getBackendUrl().then(url => {
@@ -38,23 +40,52 @@ if (typeof window !== 'undefined' && window.electronAPI?.getBackendUrl) {
   }).catch(() => {});
 }
 
+function backendCandidates() {
+  const set = new Set([
+    NOAH_BACKEND_URL,
+    import.meta.env.VITE_NOAH_BACKEND_URL || '',
+    PRODUCTION_BACKEND_URL,
+    LOCAL_BACKEND_URL,
+  ].filter(Boolean));
+  return [...set];
+}
+
 export async function checkHermesStatus() {
-  try {
-    const response = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/status`, {
-      method: 'GET',
-      headers: getByokHeaders(),
-      signal: AbortSignal.timeout(10000), // 10 second timeout
-    });
+  const detail = await getHermesBackendStatus();
+  return !!detail.active;
+}
 
-    // Check if response is actually OK and has valid content
-    if (!response.ok) return false;
-
-    // Try to parse response to ensure endpoint is working
-    const data = await response.json().catch(() => ({}));
-    return data.status === 'online' || data.online || response.ok;
-  } catch {
-    return false;
+export async function getHermesBackendStatus() {
+  for (const base of backendCandidates()) {
+    try {
+      const response = await fetch(`${base}/api/v1/hermes/status`, {
+        method: 'GET',
+        headers: getByokHeaders(),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) continue;
+      const data = await response.json().catch(() => ({}));
+      const reachable = response.ok && (typeof data === 'object');
+      if (reachable) {
+        NOAH_BACKEND_URL = base;
+        return {
+          reachable: true,
+          active: !!data.active,
+          mode: data.mode || 'unknown',
+          model: data.model || '',
+          base,
+        };
+      }
+    } catch {}
   }
+  return {
+    reachable: false,
+    active: false,
+    mode: 'unknown',
+    model: '',
+    base: NOAH_BACKEND_URL,
+    error: 'Could not reach backend',
+  };
 }
 
 export async function getHermesBrainMode() {
@@ -447,39 +478,25 @@ ${integLines.length > 0 ? integLines.join('\n') : 'No integrations configured ye
 ═══════════════════════════════════════════════════════════
 RESPONSE FORMAT
 ═══════════════════════════════════════════════════════════
-Your responses are spoken aloud. Write in natural spoken sentences only.
-ZERO markdown: no asterisks, no bullet points, no dashes, no hashtags, no numbered lists, no code blocks, no backticks.
-List things naturally: "There are three options: first this, second that, and third the other thing."
+Use clean, professional formatting:
+- Short paragraphs with clear line breaks
+- Bullet points for steps/options (use • bullets)
+- Numbered points when sequence matters
+Keep it concise, direct, and actionable.
 Address the user by name when you know it.
-Be concise but complete. Never pad. Never apologize.
 If you just saved a memory, say "Got it, I've remembered that" and confirm what you saved.
 Chain tools for complex tasks — call as many as needed to fully complete the request.`;
 }
 
-// ─── Markdown stripper (safety net — model is told not to use it, but just in case) ──
+// ─── Output cleanup (preserve formatting while removing noisy wrappers) ──
 
-function stripMarkdown(text) {
+function cleanAssistantOutput(text) {
   if (!text) return text;
   return text
-    // Remove fenced code blocks entirely — they never belong in spoken output
-    .replace(/```[\s\S]*?```/g, (m) => m.replace(/```.*?\n?/g, '').trim())
-    // Bold and italic: **text** / __text__ / *text* / _text_
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/__([^_]+)__/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/_([^_]+)_/g, '$1')
-    // Inline code: `text`
-    .replace(/`([^`]+)`/g, '$1')
-    // ATX headings: # ## ### etc at start of line
-    .replace(/^#{1,6}\s+/gm, '')
-    // Numbered lists: "1. " / "2. " at start of line → keep text, remove number
-    .replace(/^\d+\.\s+/gm, '')
-    // Bullet lists: "- " / "* " / "+ " at start of line → keep text
-    .replace(/^[-*+]\s+/gm, '')
-    // Blockquotes: > at start of line
-    .replace(/^>\s*/gm, '')
-    // Horizontal rules
-    .replace(/^[-*_]{3,}\s*$/gm, '')
+    // Remove fenced markers but keep content for readability.
+    .replace(/```(\w+)?\n?/g, '')
+    // Convert markdown bullets to Unicode bullets for clean display.
+    .replace(/^[\t ]*[-*]\s+/gm, '• ')
     // Collapse 3+ newlines to 2
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -658,7 +675,7 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
     if (data.session_id) {
       try { localStorage.setItem('noah_hermes_session', data.session_id); } catch {}
     }
-    return stripMarkdown(data.response) || 'Done.';
+    return cleanAssistantOutput(data.response) || 'Done.';
   }
 
   // ── SSE reading with one-reconnect fallback ──────────────────────────────
@@ -776,7 +793,7 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
     finalResponse = '';
   }
 
-  return stripMarkdown(finalResponse || tokenAccumulator) || 'Done.';
+  return cleanAssistantOutput(finalResponse || tokenAccumulator) || 'Done.';
 }
 
 // ─── Hermes status check ──────────────────────────────────────────────────────
@@ -884,7 +901,7 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
         refusalRetry = true;
         continue;
       }
-      return stripMarkdown(responseText) || 'Done.';
+      return cleanAssistantOutput(responseText) || 'Done.';
     }
 
     refusalRetry = false; // successfully calling tools, reset
@@ -974,5 +991,5 @@ export async function analyzeScreenshot(base64Image, token, userContext = '') {
     }),
   });
   const data = await res.json();
-  return { insight: stripMarkdown(data.choices?.[0]?.message?.content) || 'Could not analyze screen.' };
+  return { insight: cleanAssistantOutput(data.choices?.[0]?.message?.content) || 'Could not analyze screen.' };
 }
