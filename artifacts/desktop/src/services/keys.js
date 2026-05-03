@@ -106,7 +106,10 @@ export function getIntegrations() {
 }
 
 export function getIntegrationToken(service) {
-  return getIntegrations()[service] || '';
+  const integrations = getIntegrations();
+  const token = integrations[service] || '';
+  console.log('[Noah Keys] getIntegrationToken:', service, 'available:', !!token, 'prefix:', token ? token.substring(0, 8) + '...' : 'none');
+  return token;
 }
 
 export function saveIntegrationToken(service, value) {

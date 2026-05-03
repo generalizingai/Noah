@@ -147,7 +147,14 @@ export default function AssistantTab({ messages, setMessages }) {
   const [micStatus,      setMicStatus]    = useState('idle');
   const [isLoading,      setIsLoading]    = useState(false);
   const [isSpeakingState,setIsSpeakingState] = useState(false);
-  const [speakerOn,      setSpeakerOn]    = useState(isTTSAvailable());
+  const [speakerOn,      setSpeakerOn]    = useState(isTTSAvailable()); // Start with speaker on if TTS is available
+
+  // Enable speaker by default when TTS is available
+  useEffect(() => {
+    if (isTTSAvailable() && !speakerOn) {
+      setSpeakerOn(true);
+    }
+  }, [isTTSAvailable()]);
   const [currentAction,  setCurrentAction] = useState(null);
   const [screenWatchOn,  setScreenWatchOn] = useState(false);
   const [screenCaptureStatus, setScreenCaptureStatus] = useState('idle'); // idle, capturing, error
@@ -229,9 +236,19 @@ export default function AssistantTab({ messages, setMessages }) {
   }, [setMessages]);
 
   const speakResponse = useCallback(async (text) => {
-    if (!speakerOn || !isTTSAvailable()) return;
+    console.log('[Noah] speakResponse called:', { text: text?.substring(0, 50), speakerOn, isTTSAvailable: isTTSAvailable() });
+    if (!speakerOn || !isTTSAvailable()) {
+      console.log('[Noah] Skipping TTS - speaker off or TTS unavailable');
+      return;
+    }
     setIsSpeakingState(true);
-    await speak(text, () => setIsSpeakingState(true), () => setIsSpeakingState(false));
+    try {
+      await speak(text, () => setIsSpeakingState(true), () => setIsSpeakingState(false));
+      console.log('[Noah] TTS completed successfully');
+    } catch (err) {
+      console.error('[Noah] TTS failed:', err);
+      setIsSpeakingState(false);
+    }
   }, [speakerOn]);
 
   // ── Voice recorder ──────────────────────────────────────────────────────────
@@ -481,6 +498,7 @@ export default function AssistantTab({ messages, setMessages }) {
     }
 
     console.log('[Noah] Processing message:', text, 'voiceTriggered:', voiceTriggered);
+    console.log('[Noah] Speaker state:', speakerOn, 'TTS available:', isTTSAvailable());
     sendingRef.current = true;
     stopSpeaking(); setIsSpeakingState(false);
     lastUserMsgRef.current = text;
@@ -517,6 +535,7 @@ export default function AssistantTab({ messages, setMessages }) {
 
       const answer = await sendVoiceQuery(text, screen, token, onAction, history);
       setCurrentAction(null);
+      console.log('[Noah] Received answer from sendVoiceQuery:', answer?.substring(0, 100));
 
       if (streamingRef.current) {
         streamingRef.current = false;
@@ -525,6 +544,7 @@ export default function AssistantTab({ messages, setMessages }) {
         addMessage('assistant', answer);
       }
 
+      console.log('[Noah] About to call speakResponse with speakerOn:', speakerOn);
       speakResponse(answer);
 
       // Extract and save memories in background (non-blocking)

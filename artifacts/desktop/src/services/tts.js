@@ -5,13 +5,18 @@ let currentAudio = null;
 // ─── Provider detection ───────────────────────────────────────────────────────
 
 export function getActiveTTSProvider() {
-  if (getIntegrationToken('elevenlabs_key')) return 'elevenlabs';
-  if (getDeepgramKey()) return 'deepgram';
+  const elKey = getIntegrationToken('elevenlabs_key');
+  const dgKey = getDeepgramKey();
+  console.log('[Noah TTS] Provider check:', { elKey: !!elKey, dgKey: !!dgKey });
+  if (elKey) return 'elevenlabs';
+  if (dgKey) return 'deepgram';
   return null;
 }
 
 export function isTTSAvailable() {
-  return !!getActiveTTSProvider();
+  const available = !!getActiveTTSProvider();
+  console.log('[Noah TTS] isTTSAvailable:', available, 'Provider:', getActiveTTSProvider());
+  return available;
 }
 
 export function stopSpeaking() {

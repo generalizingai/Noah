@@ -844,6 +844,21 @@ function BrainModeRow() {
   }, []);
 
   useEffect(() => {
+    // Load models on component mount to ensure modelDisplayName works correctly
+    if (orModels.length === 0) {
+      fetch('https://openrouter.ai/api/v1/models')
+        .then(r => r.json())
+        .then(json => {
+          const list = (json.data || [])
+            .filter(m => m.id && m.name)
+            .sort((a, b) => a.name.localeCompare(b.name));
+          setOrModels(list);
+        })
+        .catch(() => console.log('Could not load models list'));
+    }
+  }, []);
+
+  useEffect(() => {
     if (!dropdownOpen || orModels.length > 0) return;
     setOrLoading(true);
     setOrError(null);
@@ -907,13 +922,13 @@ function BrainModeRow() {
     return `$${p < 1 ? p.toFixed(3) : p.toFixed(2)}/M`;
   };
 
-  const hermesBadge = status?.active
+  const hermesBadge = status === true
     ? <span className="status-pill green flex items-center gap-1" style={{ fontSize: 10 }}><CheckmarkCircle01Icon size={9} strokeWidth={2} /> Active</span>
     : checking
       ? <span className="status-pill flex items-center gap-1" style={{ fontSize: 10, background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)' }}>Checking…</span>
-      : status === null
+      : status === false
         ? <span className="status-pill flex items-center gap-1" style={{ fontSize: 10, background: 'rgba(239,68,68,0.08)', color: '#f87171' }}><Cancel01Icon size={9} strokeWidth={2} /> Offline</span>
-        : <span className="status-pill flex items-center gap-1" style={{ fontSize: 10, background: 'rgba(251,191,36,0.08)', color: '#fbbf24' }}>Inactive</span>;
+        : <span className="status-pill flex items-center gap-1" style={{ fontSize: 10, background: 'rgba(251,191,36,0.08)', color: '#fbbf24' }}>Checking…</span>;
 
   return (
     <Row
