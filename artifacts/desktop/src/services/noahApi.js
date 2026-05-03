@@ -50,6 +50,42 @@ function backendCandidates() {
   return [...set];
 }
 
+async function callBackendJson(base, path, { method = 'GET', token = null, body = null, includeByok = false, accept = 'application/json' } = {}) {
+  const url = `${base}${path}`;
+  const headers = {
+    Accept: accept,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(includeByok ? getByokHeaders() : {}),
+    ...(body ? { 'Content-Type': 'application/json' } : {}),
+  };
+
+  // In Electron, always use main-process HTTP to bypass renderer CORS.
+  if (isElectron && window.electronAPI?.httpApiCall) {
+    const out = await window.electronAPI.httpApiCall({
+      method,
+      url,
+      headers,
+      body,
+    });
+    if (!out?.success) throw new Error(out?.error || 'Backend request failed');
+    if ((out.statusCode || 500) >= 400) {
+      throw new Error(typeof out.data === 'string' ? out.data : (out.data?.detail || `HTTP ${out.statusCode}`));
+    }
+    return out.data;
+  }
+
+  const resp = await fetch(url, {
+    method,
+    headers,
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
 export async function checkHermesStatus() {
   const detail = await getHermesBackendStatus();
   return !!detail.active;
@@ -58,14 +94,8 @@ export async function checkHermesStatus() {
 export async function getHermesBackendStatus() {
   for (const base of backendCandidates()) {
     try {
-      const response = await fetch(`${base}/api/v1/hermes/status`, {
-        method: 'GET',
-        headers: getByokHeaders(),
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!response.ok) continue;
-      const data = await response.json().catch(() => ({}));
-      const reachable = response.ok && (typeof data === 'object');
+      const data = await callBackendJson(base, '/api/v1/hermes/status', { method: 'GET', includeByok: false });
+      const reachable = typeof data === 'object';
       if (reachable) {
         NOAH_BACKEND_URL = base;
         return {
@@ -649,6 +679,26 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
     history: history.slice(-20).map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) })),
   };
 
+  // Electron path: non-stream request through main process (CORS-free).
+  if (isElectron && window.electronAPI?.httpApiCall) {
+    try {
+      const data = await callBackendJson(NOAH_BACKEND_URL, '/api/v1/hermes/chat', {
+        method: 'POST',
+        token,
+        body: payload,
+        includeByok: true,
+      });
+      onAction?.({ type: 'hermes', label: 'Hermes done', status: 'done' });
+      if (data?.session_id) {
+        try { localStorage.setItem('noah_hermes_session', data.session_id); } catch {}
+      }
+      return cleanAssistantOutput(data?.response) || 'Done.';
+    } catch (err) {
+      onAction?.({ type: 'hermes', label: 'Hermes error', status: 'error' });
+      throw new Error(`Hermes backend unreachable: ${err.message}`);
+    }
+  }
+
   let resp;
   try {
     resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/chat`, {
@@ -807,12 +857,11 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
  */
 export async function getHermesSessions(token) {
   if (!token) throw new Error('Authentication required');
-  const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/sessions`, {
-    headers: backendHeaders(token),
-    signal: AbortSignal.timeout(8000),
+  return callBackendJson(NOAH_BACKEND_URL, '/api/v1/hermes/sessions', {
+    method: 'GET',
+    token,
+    includeByok: true,
   });
-  if (!resp.ok) throw new Error(`Failed to load sessions (${resp.status})`);
-  return resp.json();
 }
 
 /**
@@ -821,12 +870,11 @@ export async function getHermesSessions(token) {
  */
 export async function getHermesSessionHistory(sessionId, token) {
   if (!token) throw new Error('Authentication required');
-  const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/sessions/${encodeURIComponent(sessionId)}/history`, {
-    headers: backendHeaders(token),
-    signal: AbortSignal.timeout(8000),
+  return callBackendJson(NOAH_BACKEND_URL, `/api/v1/hermes/sessions/${encodeURIComponent(sessionId)}/history`, {
+    method: 'GET',
+    token,
+    includeByok: true,
   });
-  if (!resp.ok) throw new Error(`Failed to load session history (${resp.status})`);
-  return resp.json();
 }
 
 // ─── Main query ───────────────────────────────────────────────────────────────
