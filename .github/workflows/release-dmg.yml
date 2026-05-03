@@ -1,0 +1,74 @@
+name: Release Noah 1.1.6 DMG
+
+on:
+  push:
+    tags:
+      - 'v1.1.6'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number'
+        required: true
+        default: '1.1.6'
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: cd artifacts/desktop && npm install
+
+    - name: Build desktop app
+      run: cd artifacts/desktop && npm run build
+
+    - name: Build DMG
+      run: cd artifacts/desktop && npm run build:dmg
+
+    - name: Upload DMG to GitHub Releases
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.1.6
+        name: Noah 1.1.6
+        body: |
+          Noah 1.1.6 Release
+
+          ## Bug Fixes
+          - Fixed Hermes AI status display to show correct active/inactive state
+          - Fixed model selection to display correct model names from OpenRouter API
+          - Fixed voice response to properly speak back responses with error handling
+          - Enable speaker by default when TTS is available
+          - Added comprehensive debugging logs for TTS flow
+
+          ## Getting Started
+          1. Download the DMG file
+          2. Open the DMG
+          3. Drag Noah to your Applications folder
+          4. Launch Noah from Applications
+
+          ## Requirements
+          - macOS 10.15 or later
+          - 4GB RAM minimum
+          - Internet connection
+
+          ## Support
+          For issues, please visit: https://github.com/generalizingai/Noah/issues
+        files: artifacts/desktop/dist/*.dmg
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+
+    - name: Update version in package.json
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        cd artifacts/desktop
+        npm version ${{ github.event.inputs.version }} --no-git-tag-version
