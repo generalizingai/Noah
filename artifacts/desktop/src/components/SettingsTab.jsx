@@ -1092,9 +1092,7 @@ function BrainModeRow() {
               <div className="flex items-center gap-2">
                 <span className="text-[10px] text-white/40">Backend status:</span>
                 {hermesBadge}
-                <span className="text-[10px] font-mono text-indigo-300/60">
-                  {statusInfo?.model || model}
-                </span>
+                <span className="text-[10px] font-mono text-indigo-300/60">{model}</span>
               </div>
               <button
                 onClick={check}
@@ -1104,6 +1102,12 @@ function BrainModeRow() {
                 {checking ? 'Checking…' : 'Refresh'}
               </button>
             </div>
+            {statusInfo?.reachable && (
+              <p className="text-[10px] text-white/45 leading-relaxed">
+                Selected model: <span className="font-mono">{model}</span>
+                {statusInfo?.model ? <> · Backend default: <span className="font-mono">{statusInfo.model}</span></> : null}
+              </p>
+            )}
             {statusInfo?.reachable && !statusInfo?.active && (
               <p className="text-[10px] text-amber-300/75 leading-relaxed">
                 Backend is reachable at <span className="font-mono">{statusInfo.base}</span> but Hermes mode is disabled on server.

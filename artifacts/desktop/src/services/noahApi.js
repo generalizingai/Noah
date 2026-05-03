@@ -50,7 +50,7 @@ function backendCandidates() {
   return [...set];
 }
 
-async function callBackendJson(base, path, { method = 'GET', token = null, body = null, includeByok = false, accept = 'application/json' } = {}) {
+async function callBackendJson(base, path, { method = 'GET', token = null, body = null, includeByok = false, accept = 'application/json', timeoutMs = 20000 } = {}) {
   const url = `${base}${path}`;
   const headers = {
     Accept: accept,
@@ -66,6 +66,7 @@ async function callBackendJson(base, path, { method = 'GET', token = null, body 
       url,
       headers,
       body,
+      timeoutMs,
     });
     if (!out?.success) throw new Error(out?.error || 'Backend request failed');
     if ((out.statusCode || 500) >= 400) {
@@ -687,6 +688,7 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
         token,
         body: payload,
         includeByok: true,
+        timeoutMs: 240000,
       });
       onAction?.({ type: 'hermes', label: 'Hermes done', status: 'done' });
       if (data?.session_id) {

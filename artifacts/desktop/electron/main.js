@@ -1017,7 +1017,7 @@ ipcMain.handle('fetch-url', async (_, url) => {
 
 // ─── IPC: Generic HTTP API call (for integrations) ───────────────────────────
 
-ipcMain.handle('http-api-call', async (_, { method, url, headers, body }) => {
+ipcMain.handle('http-api-call', async (_, { method, url, headers, body, timeoutMs }) => {
   return new Promise((resolve) => {
     try {
       const parsed = new URL(url);
@@ -1040,7 +1040,7 @@ ipcMain.handle('http-api-call', async (_, { method, url, headers, body }) => {
         path: parsed.pathname + parsed.search,
         method: method || 'GET',
         headers: reqHeaders,
-        timeout: 20000,
+        timeout: Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 20000,
       };
 
       const req = lib.request(options, (res) => {
