@@ -15,6 +15,11 @@ import {
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
 
+// Global mutex to prevent multiple voice recorders across components
+if (typeof window !== 'undefined') {
+  window.__noahVoiceMutex = window.__noahVoiceMutex || false;
+}
+
 // ─── Action badge ──────────────────────────────────────────────────────────────
 const ACTION_ICONS = {
   save_memory:       <Archive01Icon size={12} strokeWidth={1.8} />,
@@ -145,6 +150,7 @@ export default function AssistantTab({ messages, setMessages }) {
   const [speakerOn,      setSpeakerOn]    = useState(isTTSAvailable());
   const [currentAction,  setCurrentAction] = useState(null);
   const [screenWatchOn,  setScreenWatchOn] = useState(false);
+  const [screenCaptureStatus, setScreenCaptureStatus] = useState('idle'); // idle, capturing, error
   const [pttKeyLabel,    setPttKeyLabel]  = useState('');
   const [savedFlash,     setSavedFlash]   = useState(false);
   const [showHistory,    setShowHistory]  = useState(false);
@@ -163,6 +169,7 @@ export default function AssistantTab({ messages, setMessages }) {
   const handleSendRef  = useRef(null); // always points to latest handleSend (avoids stale closures)
   const sendingRef     = useRef(false); // mutex — prevents double-send from concurrent PTT/IPC events
   const streamingRef   = useRef(false); // true while SSE streaming is in progress
+  const isRecordingRef = useRef(false); // prevents multiple recorder instances
 
   const scrollToBottom = () => bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
 
@@ -233,16 +240,54 @@ export default function AssistantTab({ messages, setMessages }) {
       recorderRef.current = new VoiceRecorder(
         // Use handleSendRef so this closure always calls the latest handleSend,
         // even after messages have changed (avoids stale conversation history)
-        async (transcript) => { setMicStatus('idle'); await handleSendRef.current?.(transcript, true); },
-        (err) => { setMicStatus('idle'); addMessage('assistant', `🎤 ${err}`); },
-        (s) => setMicStatus(s)
+        async (transcript) => {
+          console.log('[Noah] Voice recorder callback received transcript:', transcript);
+          if (isRecordingRef.current) {
+            isRecordingRef.current = false;
+            window.__noahVoiceMutex = false;
+            setMicStatus('idle');
+            // Only send if we have a valid transcript
+            if (transcript?.trim()) {
+              await handleSendRef.current?.(transcript, true);
+            }
+          }
+        },
+        (err) => {
+          if (isRecordingRef.current) {
+            isRecordingRef.current = false;
+            window.__noahVoiceMutex = false;
+            setMicStatus('idle');
+            addMessage('assistant', `🎤 ${err}`);
+          }
+        },
+        (s) => {
+          if (s === 'listening' && !isRecordingRef.current) {
+            isRecordingRef.current = true;
+          }
+          setMicStatus(s);
+        }
       );
     }
     return recorderRef.current;
   }, [addMessage]);
 
-  const startListening = useCallback(() => { stopSpeaking(); setIsSpeakingState(false); getRecorder().start(); }, [getRecorder]);
-  const stopListening  = useCallback(() => { recorderRef.current?.stop(); }, []);
+  const startListening = useCallback(() => {
+    if (isRecordingRef.current || (typeof window !== 'undefined' && window.__noahVoiceMutex)) {
+      console.log('[Noah] Recording already in progress, ignoring duplicate start');
+      return; // Prevent multiple recordings
+    }
+    console.log('[Noah] Starting voice recording');
+    window.__noahVoiceMutex = true;
+    stopSpeaking(); setIsSpeakingState(false); getRecorder().start();
+  }, [getRecorder]);
+  const stopListening  = useCallback(() => {
+    if (isRecordingRef.current) {
+      console.log('[Noah] Stopping voice recording');
+      isRecordingRef.current = false;
+      window.__noahVoiceMutex = false;
+      recorderRef.current?.stop();
+    }
+  }, []);
   const toggleListening = useCallback(() => {
     if (micStatus === 'listening') stopListening();
     else if (micStatus === 'idle') startListening();
@@ -274,24 +319,74 @@ export default function AssistantTab({ messages, setMessages }) {
   useEffect(() => {
     if (!isElectron) return;
     const unsub = window.electronAPI.onPTTToggle?.((active) => {
-      if (active) startListening(); else stopListening();
+      if (active) {
+        // Double-check mutex state before starting
+        if (isRecordingRef.current || (typeof window !== 'undefined' && window.__noahVoiceMutex)) {
+          console.log('[Noah] IPC toggle ignored - recording already in progress');
+          return;
+        }
+        console.log('[Noah] IPC toggle starting recording');
+        window.__noahVoiceMutex = true;
+        startListening();
+      } else {
+        stopListening();
+      }
     });
     return () => { if (typeof unsub === 'function') unsub(); };
   }, [startListening, stopListening]);
 
   // ── Screen watch ────────────────────────────────────────────────────────────
-  const captureScreen = async () => isElectron ? window.electronAPI.captureScreen() : null;
+  const captureScreen = async () => {
+    if (!isElectron) {
+      setScreenCaptureStatus('error');
+      return null;
+    }
+
+    try {
+      setScreenCaptureStatus('capturing');
+      const result = await window.electronAPI.captureScreen();
+      if (!result) {
+        console.log('[Noah] Screen capture returned null');
+        setScreenCaptureStatus('error');
+      } else {
+        setScreenCaptureStatus('capturing');
+      }
+      return result;
+    } catch (err) {
+      console.error('[Noah] Screen capture error:', err);
+      setScreenCaptureStatus('error');
+      return null;
+    }
+  };
 
   useEffect(() => {
     if (screenWatchOn) {
-      const capture = async () => { const s = await captureScreen(); if (s) watchScreenRef.current = s; };
+      console.log('[Noah] Starting screen watch');
+      setScreenCaptureStatus('capturing');
+      const capture = async () => {
+        const s = await captureScreen();
+        if (s) {
+          watchScreenRef.current = s;
+          console.log('[Noah] Screen captured successfully');
+        } else {
+          console.log('[Noah] Screen capture failed');
+        }
+      };
       capture();
       watchTimerRef.current = setInterval(capture, 3000);
     } else {
+      console.log('[Noah] Stopping screen watch');
+      setScreenCaptureStatus('idle');
       clearInterval(watchTimerRef.current);
       watchTimerRef.current = null;
+      watchScreenRef.current = null;
     }
-    return () => clearInterval(watchTimerRef.current);
+    return () => {
+      if (watchTimerRef.current) {
+        clearInterval(watchTimerRef.current);
+        watchTimerRef.current = null;
+      }
+    };
   }, [screenWatchOn]);
 
   // ── Save chat ───────────────────────────────────────────────────────────────
@@ -374,7 +469,18 @@ export default function AssistantTab({ messages, setMessages }) {
 
   // ── Send ────────────────────────────────────────────────────────────────────
   const handleSend = useCallback(async (text, voiceTriggered = false) => {
-    if (!text?.trim() || isLoading || sendingRef.current) return;
+    if (!text?.trim() || isLoading || sendingRef.current) {
+      console.log('[Noah] handleSend blocked:', { text: text?.trim(), isLoading, sending: sendingRef.current });
+      return;
+    }
+
+    // Prevent duplicate message sending - check if this message is already being processed
+    if (lastUserMsgRef.current === text && sendingRef.current) {
+      console.log('[Noah] Duplicate message detected, ignoring:', text);
+      return;
+    }
+
+    console.log('[Noah] Processing message:', text, 'voiceTriggered:', voiceTriggered);
     sendingRef.current = true;
     stopSpeaking(); setIsSpeakingState(false);
     lastUserMsgRef.current = text;
@@ -431,7 +537,11 @@ export default function AssistantTab({ messages, setMessages }) {
       } else {
         addMessage('assistant', `Something went wrong: ${err.message}`);
       }
-    } finally { setIsLoading(false); sendingRef.current = false; }
+    } finally {
+      setIsLoading(false);
+      sendingRef.current = false;
+      console.log('[Noah] handleSend completed for:', text);
+    }
   }, [isLoading, user, getToken, screenWatchOn, addMessage, addStreamingMessage, updateStreamingMessage, finalizeStreamingMessage, speakResponse, messages]);
 
   // Keep the ref in sync so VoiceRecorder callbacks always call the latest version
@@ -496,7 +606,15 @@ export default function AssistantTab({ messages, setMessages }) {
               <h2 className="text-sm font-semibold text-white/80">Assistant</h2>
               <p className="text-[11px] text-white/28">
                 Hold <kbd className="px-1 py-0.5 rounded text-[10px] font-mono bg-white/8 text-white/45">{pttKeyLabel}</kbd> to talk
-                {screenWatchOn && <span className="ml-2 text-green-400/80">· watching screen</span>}
+                {screenWatchOn && (
+                  <span className={`ml-2 text-xs ${
+                    screenCaptureStatus === 'capturing' ? 'text-green-400/80' :
+                    screenCaptureStatus === 'error' ? 'text-red-400/80' : 'text-yellow-400/80'
+                  }`}>
+                    · {screenCaptureStatus === 'capturing' ? 'capturing screen' :
+                       screenCaptureStatus === 'error' ? 'screen capture error' : 'starting screen watch'}
+                  </span>
+                )}
               </p>
             </div>
             <ScreenWatchBadge active={screenWatchOn} onClick={() => setScreenWatchOn(v => !v)} />
@@ -665,7 +783,7 @@ export default function AssistantTab({ messages, setMessages }) {
                   isListening    ? 'Release key to send…' :
                   isTranscribing ? 'Transcribing…' :
                   isLoading      ? 'Thinking…' :
-                  screenWatchOn  ? 'Ask about your screen…' :
+                  screenWatchOn  ? (screenCaptureStatus === 'error' ? 'Screen capture error' : 'Ask about your screen…') :
                   'Ask Noah anything…'
                 }
                 className="noah-input flex-1 px-4 py-2.5 text-sm"

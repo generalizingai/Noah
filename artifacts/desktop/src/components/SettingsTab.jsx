@@ -833,7 +833,15 @@ function BrainModeRow() {
     setChecking(false);
   };
 
-  useEffect(() => { check(); }, []);
+  useEffect(() => {
+    check(); // Initial check
+
+    // Set up periodic status checking every 30 seconds
+    const interval = setInterval(check, 30000);
+
+    // Clean up interval on unmount
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!dropdownOpen || orModels.length > 0) return;
