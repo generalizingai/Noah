@@ -1,6 +1,6 @@
 {
   "name": "noah-desktop",
-  "version": "1.1.2",
+  "version": "1.1.5",
   "description": "Noah AI Desktop Assistant",
   "main": "electron/main.js",
   "scripts": {
