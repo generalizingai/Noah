@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../services/auth';
 import { analyzeScreenshot, sendVoiceQuery, getHermesSessions, getHermesSessionHistory, getHermesBrainMode } from '../services/noahApi';
 import { VoiceRecorder } from '../services/voiceRecorder';
-import { speak, stopSpeaking, isTTSAvailable } from '../services/tts';
+import { speak, stopSpeaking, isTTSAvailable, onSpeakingStateChange } from '../services/tts';
 import { PTTManager, getPTTKeyLabel } from '../services/ptt';
 import { extractAndSaveMemories } from '../services/memory';
 import { saveConversation } from '../services/conversations';
@@ -253,6 +253,14 @@ export default function AssistantTab({ messages, setMessages }) {
       setIsSpeakingState(false);
     }
   }, [speakerOn]);
+
+  // Trust the TTS service as source-of-truth for speaking state.
+  useEffect(() => {
+    const unsubscribe = onSpeakingStateChange((speaking) => {
+      setIsSpeakingState(!!speaking);
+    });
+    return unsubscribe;
+  }, []);
 
   // ── Voice recorder ──────────────────────────────────────────────────────────
   const getRecorder = useCallback(() => {
@@ -775,7 +783,7 @@ export default function AssistantTab({ messages, setMessages }) {
               </div>
             )}
 
-            {isSpeakingState && !isLoading && (
+            {isSpeakingState && (
               <div className="flex items-center gap-2 px-1">
                 <div className="flex gap-0.5 items-end h-4">
                   {[0,1,2,3,4].map(i => (

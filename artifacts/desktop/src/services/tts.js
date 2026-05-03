@@ -2,6 +2,18 @@ import { getDeepgramKey, getIntegrationToken, getVoiceModel } from './keys';
 
 let currentAudio = null;
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
+const speakingListeners = new Set();
+
+function emitSpeakingState(isSpeakingNow) {
+  for (const fn of speakingListeners) {
+    try { fn(isSpeakingNow); } catch {}
+  }
+}
+
+export function onSpeakingStateChange(listener) {
+  speakingListeners.add(listener);
+  return () => speakingListeners.delete(listener);
+}
 
 function base64ToBlob(base64, mimeType = 'audio/mpeg') {
   const bytes = atob(base64);
@@ -40,6 +52,7 @@ export function stopSpeaking() {
     currentAudio.src = '';
     currentAudio = null;
   }
+  emitSpeakingState(false);
 }
 
 export function isSpeaking() {
@@ -93,10 +106,16 @@ async function speakElevenLabs(text, voiceId, apiKey, onStart, onEnd) {
   const audio = new Audio(url);
   currentAudio = audio;
 
-  audio.onplay  = () => onStart?.();
-  audio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; onEnd?.(); };
-  audio.onerror = () => { URL.revokeObjectURL(url); currentAudio = null; onEnd?.(); };
-  await audio.play();
+  audio.onplay  = () => { emitSpeakingState(true); onStart?.(); };
+  audio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; emitSpeakingState(false); onEnd?.(); };
+  audio.onerror = () => { URL.revokeObjectURL(url); currentAudio = null; emitSpeakingState(false); onEnd?.(); };
+  try {
+    emitSpeakingState(true);
+    await audio.play();
+  } catch (err) {
+    emitSpeakingState(false);
+    throw err;
+  }
 }
 
 // ─── Deepgram TTS ─────────────────────────────────────────────────────────────
@@ -131,10 +150,16 @@ async function speakDeepgram(text, voice, apiKey, onStart, onEnd) {
   const audio = new Audio(url);
   currentAudio = audio;
 
-  audio.onplay  = () => onStart?.();
-  audio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; onEnd?.(); };
-  audio.onerror = () => { URL.revokeObjectURL(url); currentAudio = null; onEnd?.(); };
-  await audio.play();
+  audio.onplay  = () => { emitSpeakingState(true); onStart?.(); };
+  audio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; emitSpeakingState(false); onEnd?.(); };
+  audio.onerror = () => { URL.revokeObjectURL(url); currentAudio = null; emitSpeakingState(false); onEnd?.(); };
+  try {
+    emitSpeakingState(true);
+    await audio.play();
+  } catch (err) {
+    emitSpeakingState(false);
+    throw err;
+  }
 }
 
 // ─── Main speak function ─────────────────────────────────────────────────────
@@ -158,6 +183,7 @@ export async function speak(text, onStart, onEnd) {
     }
   } catch (err) {
     console.error('TTS failed:', err);
+    emitSpeakingState(false);
     onEnd?.();
   }
 }
