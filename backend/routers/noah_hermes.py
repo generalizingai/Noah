@@ -39,7 +39,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -297,7 +297,7 @@ class ToolResultRequest(BaseModel):
 def _resolve_max_iterations(latency_mode: Optional[str]) -> int:
     """Per-request iteration budget: faster for voice/realtime traffic."""
     base = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS", "12"))
-    realtime = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS_REALTIME", "6"))
+    realtime = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS_REALTIME", "4"))
     return realtime if (latency_mode or "").lower() == "realtime" else base
 
 
@@ -760,3 +760,40 @@ async def delete_skill(slug: str, uid: str = Depends(auth.get_current_user_uid))
     if shared.exists():
         raise HTTPException(status_code=403, detail="Cannot delete shared skills. Contact admin.")
     raise HTTPException(status_code=404, detail=f"Skill '{slug}' not found")
+def _preflight_ok() -> Response:
+    """
+    Explicit CORS preflight response for Electron/renderer clients.
+    Some clients still issue OPTIONS probes that bypass middleware heuristics.
+    """
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Headers": (
+                "Authorization,Content-Type,Accept,"
+                "X-BYOK-OpenAI,X-BYOK-OpenRouter,X-BYOK-Deepgram,X-BYOK-Anthropic"
+            ),
+            "Access-Control-Max-Age": "86400",
+        },
+    )
+
+
+@router.options("/chat")
+async def hermes_chat_options():
+    return _preflight_ok()
+
+
+@router.options("/tool_result/{call_id}")
+async def hermes_tool_result_options(call_id: str):
+    return _preflight_ok()
+
+
+@router.options("/skills")
+async def hermes_skills_options():
+    return _preflight_ok()
+
+
+@router.options("/skills/{slug:path}")
+async def hermes_skill_options(slug: str):
+    return _preflight_ok()

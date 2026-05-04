@@ -80,6 +80,7 @@ export default function FloatingBar() {
   const [inputMode,  setInputMode]  = useState(false);
   const [inputText,  setInputText]  = useState('');
   const [isSpeakingState, setIsSpeakingState] = useState(false);
+  const [activeProcess, setActiveProcess] = useState('');
 
   const recRef        = useRef(null);
   const pttRef        = useRef(null);
@@ -217,14 +218,36 @@ export default function FloatingBar() {
     setInputText('');
     setLastQ(t);
     setPhase('thinking');
+    setActiveProcess('Thinking…');
     clearTimeout(dismissTimer.current);
 
     try {
       const token  = user ? await getToken() : null;
       const screen = null; // Keep voice path low-latency; no automatic screenshot capture.
-      const answer = await sendVoiceQuery(t, screen, token, () => {}, [], { voiceMode: true });
+      const answer = await sendVoiceQuery(
+        t,
+        screen,
+        token,
+        (action) => {
+          if (!action) return;
+          if (action.type === 'hermes_token') {
+            setPhase('thinking');
+            setActiveProcess('Generating response…');
+            return;
+          }
+          if (action.status === 'running') {
+            setPhase('thinking');
+            setActiveProcess(action.label || 'Working…');
+          } else if (action.status === 'done') {
+            setActiveProcess(action.label || '');
+          }
+        },
+        [],
+        { voiceMode: true }
+      );
       setResponse(answer);
       setPhase('response');
+      setActiveProcess('');
       broadcastQA(t, answer);
 
       // Retract the pill only after Noah FINISHES speaking.
@@ -236,6 +259,7 @@ export default function FloatingBar() {
     } catch (err) {
       setResponse(err.message);
       setPhase('error');
+      setActiveProcess('');
       scheduleIdle(7000);
     } finally {
       sendingRef.current = false;
@@ -417,8 +441,18 @@ export default function FloatingBar() {
             {phase === 'thinking' && (
               <>
                 <Spinner />
-                <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.4)', whiteSpace: 'nowrap' }}>
-                  {isTranscribing ? 'Transcribing…' : 'Thinking…'}
+                <span
+                  className="status-shimmer"
+                  style={{
+                    fontSize: 10.5,
+                    color: 'rgba(255,255,255,0.65)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    maxWidth: 230,
+                  }}
+                >
+                  {isTranscribing ? 'Transcribing…' : (activeProcess || 'Thinking…')}
                 </span>
               </>
             )}

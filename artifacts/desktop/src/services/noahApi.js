@@ -167,6 +167,14 @@ export function setHermesModel(model) {
   try { localStorage.setItem('noah_hermes_model', model || DEFAULT_HERMES_MODEL); } catch {}
 }
 
+function getHermesVoiceModel() {
+  try {
+    return localStorage.getItem('noah_hermes_voice_model') || 'openai/gpt-4o-mini';
+  } catch {
+    return 'openai/gpt-4o-mini';
+  }
+}
+
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
 
 // ─── Cached system info ───────────────────────────────────────────────────────
@@ -425,6 +433,8 @@ function cleanAssistantOutput(text) {
     .replace(/^[\t ]*[-*]\s+/gm, '• ')
     // Normalize numbered markers.
     .replace(/^[\t ]*(\d+)\)\s+/gm, '$1. ')
+    // Enforce no em-dash / en-dash in UI copy.
+    .replace(/[—–]/g, '-')
     // Collapse 3+ newlines to 2
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -572,7 +582,7 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
     message: transcript,
     system_prompt: system,
     session_id: sessionId || undefined,
-    model: getHermesModel(),
+    model: isVoiceMode ? getHermesVoiceModel() : getHermesModel(),
     latency_mode: isVoiceMode ? 'realtime' : 'balanced',
     history: history
       .slice(isVoiceMode ? -4 : -8)
@@ -593,9 +603,10 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
       method: 'POST',
       headers: backendHeaders(token, { Accept: 'text/event-stream' }),
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(180000),
+      signal: AbortSignal.timeout(isVoiceMode ? 120000 : 180000),
     });
   } catch (err) {
+    onAction?.({ type: 'hermes', label: 'SSE unavailable, switching mode…', status: 'running' });
     // Fallback for environments where SSE fetch is unavailable.
     try {
       const data = await postHermesJson(payload, isVoiceMode ? 120000 : 240000);
@@ -742,7 +753,7 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
         method: 'POST',
         headers: backendHeaders(token, { Accept: 'text/event-stream' }),
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(180000),
+        signal: AbortSignal.timeout(isVoiceMode ? 120000 : 180000),
       });
     } catch (err) {
       onAction?.({ type: 'hermes', label: 'Reconnect failed', status: 'error' });

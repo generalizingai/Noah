@@ -43,8 +43,9 @@ const ACTION_ICONS = {
 function ActionBadge({ action }) {
   if (!action) return null;
   const icon = ACTION_ICONS[action.type] || <FlashIcon size={12} strokeWidth={1.8} />;
+  const isRunning = action.status === 'running';
   return (
-    <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs max-w-[90%]"
+    <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs max-w-[90%] ${isRunning ? 'status-shimmer' : ''}`}
       style={{ background: 'rgba(22,163,74,0.08)', border: '1px solid rgba(22,163,74,0.15)' }}>
       <span className={action.status === 'error' ? 'text-red-400' : 'text-green-400'}>{icon}</span>
       {action.status === 'running' && <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse flex-shrink-0" />}
@@ -781,11 +782,14 @@ export default function AssistantTab({ messages, setMessages }) {
                 <div className="flex gap-3 justify-start">
                   <NoahLogo size={26} className="flex-shrink-0 mt-0.5" />
                   <div className="px-4 py-3 rounded-2xl rounded-tl-sm msg-noah">
-                    <div className="flex gap-1 items-center">
+                    <div className="flex gap-2 items-center">
                       {[0,1,2].map(i => (
                         <div key={i} className="w-1.5 h-1.5 rounded-full bg-green-400 animate-bounce"
                           style={{ animationDelay: `${i * 0.15}s` }} />
                       ))}
+                      <span className="text-[11px] text-white/60 status-shimmer">
+                        {currentAction?.label || 'Thinking…'}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -814,7 +818,9 @@ export default function AssistantTab({ messages, setMessages }) {
             <div className="px-5 py-1.5 flex items-center gap-2 flex-shrink-0"
               style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
               <div className={`w-2 h-2 rounded-full flex-shrink-0 animate-pulse ${isTranscribing ? 'bg-amber-400' : 'bg-green-400'}`} />
-              <span className="text-xs text-white/35">{isTranscribing ? 'Transcribing…' : 'Thinking…'}</span>
+              <span className={`text-xs ${isLoading ? 'status-shimmer' : 'text-white/35'}`}>
+                {isTranscribing ? 'Transcribing…' : (currentAction?.label || 'Thinking…')}
+              </span>
             </div>
           )}
 

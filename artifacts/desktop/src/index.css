@@ -228,6 +228,26 @@ body {
   40%         { transform: translateY(-5px); }
 }
 
+@keyframes status-shimmer {
+  0%   { background-position: -220px 0; }
+  100% { background-position: 220px 0; }
+}
+
+.status-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    rgba(255,255,255,0.22) 0%,
+    rgba(255,255,255,0.6) 48%,
+    rgba(255,255,255,0.22) 100%
+  );
+  background-size: 220px 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent !important;
+  animation: status-shimmer 1.2s linear infinite;
+}
+
 /* ── Dynamic Island animations ───────────────────────
    islandWave      — waveform bars in listening state
    islandContentIn — content fades + scales in on each phase change
