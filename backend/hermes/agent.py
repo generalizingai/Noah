@@ -202,11 +202,23 @@ class AIAgent:
         # 2) Context BYOK key (same-thread paths)
         # 3) Server env fallback (if operator intentionally sets one)
         key = self._api_key or get_byok_key('openrouter')
+        base_url = "https://openrouter.ai/api/v1"
         if key:
-            return OpenAI(api_key=key, base_url="https://openrouter.ai/api/v1")
-        base_url = os.environ.get("AI_INTEGRATIONS_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+            # Force the Authorization header explicitly in addition to api_key.
+            # This guards against SDK/provider edge cases where auth headers are
+            # not propagated on custom base URLs.
+            return OpenAI(
+                api_key=key,
+                base_url=base_url,
+                default_headers={"Authorization": f"Bearer {key}"},
+            )
+        base_url = os.environ.get("AI_INTEGRATIONS_OPENROUTER_BASE_URL", base_url)
         key = os.environ.get("AI_INTEGRATIONS_OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "dummy")
-        return OpenAI(api_key=key, base_url=base_url)
+        return OpenAI(
+            api_key=key,
+            base_url=base_url,
+            default_headers={"Authorization": f"Bearer {key}"},
+        )
 
     # ── Tool execution ──────────────────────────────────────────────────────
 

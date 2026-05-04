@@ -75,6 +75,13 @@ def _resolve_provider_and_key(request: Request, model_used: str) -> tuple[Option
     byok_anthropic = h.get("x-byok-anthropic") or h.get("X-BYOK-Anthropic")
 
     m = (model_used or "").lower().strip()
+    logger.info(
+        "Hermes BYOK headers model=%s openrouter=%s openai=%s anthropic=%s",
+        model_used,
+        bool(byok_openrouter and byok_openrouter.strip()),
+        bool(byok_openai and byok_openai.strip()),
+        bool(byok_anthropic and byok_anthropic.strip()),
+    )
 
     # OpenRouter-format model IDs typically include provider/model (contains slash).
     if "/" in m and byok_openrouter:
