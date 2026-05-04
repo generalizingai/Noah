@@ -67,6 +67,37 @@ def _require_hermes_mode() -> None:
         )
 
 
+def _resolve_provider_and_key(request: Request, model_used: str) -> tuple[Optional[str], Optional[str]]:
+    """Resolve provider/api key from BYOK headers for thread-safe Hermes execution."""
+    h = request.headers
+    byok_openrouter = h.get("x-byok-openrouter") or h.get("X-BYOK-OpenRouter")
+    byok_openai = h.get("x-byok-openai") or h.get("X-BYOK-OpenAI")
+    byok_anthropic = h.get("x-byok-anthropic") or h.get("X-BYOK-Anthropic")
+
+    m = (model_used or "").lower().strip()
+
+    # OpenRouter-format model IDs typically include provider/model (contains slash).
+    if "/" in m and byok_openrouter:
+        return "openrouter", byok_openrouter
+    if "/" in m:
+        return "openrouter", None
+
+    if any(k in m for k in ("gpt", "openai", "o1", "o3", "o4")):
+        return "openai", byok_openai
+    if any(k in m for k in ("claude", "anthropic")):
+        return "anthropic", (byok_anthropic or byok_openai)
+
+    # Fallback preference.
+    if byok_openrouter:
+        return "openrouter", byok_openrouter
+    if byok_openai:
+        return "openai", byok_openai
+    if byok_anthropic:
+        return "anthropic", byok_anthropic
+
+    return None, None
+
+
 # ── Remote tool proxy store ──────────────────────────────────────────────────
 
 # Maps call_id → {"event": threading.Event, "result": Any, "uid": str}
@@ -308,11 +339,14 @@ async def hermes_chat(
 
     # Client-selected model takes priority; env var is the fallback default
     model_used = req.model or os.environ.get("NOAH_HERMES_MODEL", "google/gemma-4-31b-it")
+    provider_override, api_key_override = _resolve_provider_and_key(request, model_used)
     agent = create_hermes_agent(
         system_prompt=req.system_prompt,
         session_id=session_id,
         uid=uid,
         model=model_used,
+        provider=provider_override,
+        api_key=api_key_override,
     )
 
     accept = request.headers.get("accept", "")

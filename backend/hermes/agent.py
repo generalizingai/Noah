@@ -197,9 +197,13 @@ class AIAgent:
         """OpenAI-compatible client pointed at OpenRouter, using BYOK key if provided."""
         from openai import OpenAI
         from utils.byok import get_byok_key
-        byok_key = get_byok_key('openrouter')
-        if byok_key:
-            return OpenAI(api_key=byok_key, base_url="https://openrouter.ai/api/v1")
+        # Priority:
+        # 1) Explicit per-request key injected by router/hermes_bridge
+        # 2) Context BYOK key (same-thread paths)
+        # 3) Server env fallback (if operator intentionally sets one)
+        key = self._api_key or get_byok_key('openrouter')
+        if key:
+            return OpenAI(api_key=key, base_url="https://openrouter.ai/api/v1")
         base_url = os.environ.get("AI_INTEGRATIONS_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         key = os.environ.get("AI_INTEGRATIONS_OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "dummy")
         return OpenAI(api_key=key, base_url=base_url)
