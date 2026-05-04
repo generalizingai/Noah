@@ -3,7 +3,7 @@ import { useAuth } from '../services/auth';
 import { sendVoiceQuery } from '../services/noahApi';
 import { VoiceRecorder } from '../services/voiceRecorder';
 import { PTTManager, getPTTKeyLabel, getPTTKeyCode } from '../services/ptt';
-import { speak, stopSpeaking, isTTSAvailable } from '../services/tts';
+import { speak, stopSpeaking, isTTSAvailable, onSpeakingStateChange } from '../services/tts';
 import { NoahLogo } from '../App';
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
@@ -79,6 +79,7 @@ export default function FloatingBar() {
   const [globalKey,  setGlobalKey]  = useState('Option+Space');
   const [inputMode,  setInputMode]  = useState(false);
   const [inputText,  setInputText]  = useState('');
+  const [isSpeakingState, setIsSpeakingState] = useState(false);
 
   const recRef        = useRef(null);
   const pttRef        = useRef(null);
@@ -220,7 +221,7 @@ export default function FloatingBar() {
 
     try {
       const token  = user ? await getToken() : null;
-      const screen = isElectron ? await window.electronAPI?.captureScreen?.() : null;
+      const screen = null; // Keep voice path low-latency; no automatic screenshot capture.
       const answer = await sendVoiceQuery(t, screen, token, () => {});
       setResponse(answer);
       setPhase('response');
@@ -319,7 +320,14 @@ export default function FloatingBar() {
   }, [inputMode]);
 
   const isActive    = phase !== 'idle' || inputMode;
-  const hasResponse = phase === 'response' || phase === 'error';
+  const hasResponse = phase === 'response' || phase === 'error' || isSpeakingState;
+
+  useEffect(() => {
+    const unsubscribe = onSpeakingStateChange((speaking) => {
+      setIsSpeakingState(!!speaking);
+    });
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     if (!isElectron) return;
@@ -412,6 +420,30 @@ export default function FloatingBar() {
                 <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.4)', whiteSpace: 'nowrap' }}>
                   {isTranscribing ? 'Transcribing…' : 'Thinking…'}
                 </span>
+              </>
+            )}
+
+            {isSpeakingState && (
+              <>
+                <Waveform />
+                <button
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); stopSpeaking(); setIsSpeakingState(false); }}
+                  title="Stop voice"
+                  style={{
+                    border: '1px solid rgba(239,68,68,0.35)',
+                    background: 'rgba(239,68,68,0.12)',
+                    color: '#fca5a5',
+                    borderRadius: 8,
+                    fontSize: 10,
+                    padding: '2px 7px',
+                    lineHeight: 1.4,
+                    cursor: 'pointer',
+                    pointerEvents: 'all',
+                  }}
+                >
+                  Stop
+                </button>
               </>
             )}
 

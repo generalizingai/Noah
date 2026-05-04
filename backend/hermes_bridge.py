@@ -97,6 +97,7 @@ def _schedule_session_cleanup(db: SessionDB) -> None:
 
 _agent_lock = threading.Lock()
 _agent_cache: Dict[tuple, AIAgent] = {}  # (uid, session_id) → AIAgent
+_MAX_ITERATIONS = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS", "12"))
 
 
 def _key_fingerprint(value: Optional[str]) -> str:
@@ -177,7 +178,7 @@ def _get_or_create_agent(
                 provider=provider,
                 quiet_mode=True,
                 ephemeral_system_prompt=system_prompt,
-                max_iterations=25,
+                max_iterations=_MAX_ITERATIONS,
                 session_id=session_id,
                 session_db=_get_shared_db(),
                 tool_start_callback=tool_start_callback,
@@ -281,7 +282,7 @@ def create_hermes_agent(
         provider=provider,
         quiet_mode=True,
         ephemeral_system_prompt=system_prompt,
-        max_iterations=25,
+        max_iterations=_MAX_ITERATIONS,
         session_id=session_id,
         session_db=db,
         tool_start_callback=tool_start_callback,

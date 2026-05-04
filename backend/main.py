@@ -10,6 +10,7 @@ logging.basicConfig(level=logging.INFO)
 
 import firebase_admin
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from routers import (
     chat,
@@ -83,6 +84,15 @@ except Exception as _fb_err:
     )
 
 app = FastAPI()
+
+# Allow desktop renderer (app://localhost), local dev, and hosted clients to call
+# Hermes SSE/chat endpoints directly from the renderer.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")

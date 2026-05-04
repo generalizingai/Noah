@@ -68,9 +68,19 @@ async function callBackendJson(base, path, { method = 'GET', token = null, body 
       body,
       timeoutMs,
     });
-    if (!out?.success) throw new Error(out?.error || 'Backend request failed');
+    if (!out?.success) throw new Error((out?.error || '').trim() || 'Backend request failed');
     if ((out.statusCode || 500) >= 400) {
-      throw new Error(typeof out.data === 'string' ? out.data : (out.data?.detail || `HTTP ${out.statusCode}`));
+      const raw =
+        typeof out.data === 'string'
+          ? out.data.trim()
+          : (
+              out.data?.detail ||
+              out.data?.message ||
+              out.data?.error ||
+              ''
+            );
+      const msg = raw || `HTTP ${out.statusCode}${out.statusMessage ? ` ${out.statusMessage}` : ''}`;
+      throw new Error(msg);
     }
     return out.data;
   }
@@ -513,6 +523,10 @@ Use clean, professional formatting:
 - Bullet points for steps/options (use • bullets)
 - Numbered points when sequence matters
 Keep it concise, direct, and actionable.
+Default to human-like brevity:
+- If the user asks a casual question, answer in 1-4 short sentences.
+- Only give long detailed responses when the user explicitly asks for detail.
+- Avoid robotic verbosity and repeated disclaimers.
 Address the user by name when you know it.
 If you just saved a memory, say "Got it, I've remembered that" and confirm what you saved.
 Chain tools for complex tasks — call as many as needed to fully complete the request.`;
@@ -525,8 +539,17 @@ function cleanAssistantOutput(text) {
   return text
     // Remove fenced markers but keep content for readability.
     .replace(/```(\w+)?\n?/g, '')
+    // Convert markdown heading markers into plain text headings.
+    .replace(/^[\t ]{0,3}#{1,6}\s+/gm, '')
+    // Remove markdown emphasis markers while keeping the text.
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/_(.*?)_/g, '$1')
     // Convert markdown bullets to Unicode bullets for clean display.
     .replace(/^[\t ]*[-*]\s+/gm, '• ')
+    // Normalize numbered markers.
+    .replace(/^[\t ]*(\d+)\)\s+/gm, '$1. ')
     // Collapse 3+ newlines to 2
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -609,11 +632,12 @@ async function executeAndReportTool(callId, toolName, args, token) {
       if (!approved) {
         result = { error: 'User cancelled — operation was not approved.' };
         try {
-          await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/tool_result/${callId}`, {
+          await callBackendJson(NOAH_BACKEND_URL, `/api/v1/hermes/tool_result/${callId}`, {
             method: 'POST',
-            headers: backendHeaders(token),
-            body: JSON.stringify(result),
-            signal: AbortSignal.timeout(15000),
+            token,
+            body: result,
+            includeByok: true,
+            timeoutMs: 15000,
           });
         } catch {}
         return;
@@ -629,16 +653,13 @@ async function executeAndReportTool(callId, toolName, args, token) {
   }
 
   try {
-    const resp = await fetch(`${NOAH_BACKEND_URL}/api/v1/hermes/tool_result/${callId}`, {
+    await callBackendJson(NOAH_BACKEND_URL, `/api/v1/hermes/tool_result/${callId}`, {
       method: 'POST',
-      headers: backendHeaders(token),
-      body: JSON.stringify(result),
-      signal: AbortSignal.timeout(15000),
+      token,
+      body: result,
+      includeByok: true,
+      timeoutMs: 15000,
     });
-    if (!resp.ok) {
-      const errBody = await resp.json().catch(() => ({}));
-      console.error('[Noah] tool_result POST failed:', resp.status, errBody);
-    }
   } catch (err) {
     console.error('[Noah] Failed to report tool result for', callId, ':', err.message);
   }
@@ -676,29 +697,16 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
     system_prompt: system,
     session_id: sessionId || undefined,
     model: getHermesModel(),
-    history: history.slice(-20).map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) })),
+    history: history.slice(-8).map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) })),
   };
 
-  // Electron path: non-stream request through main process (CORS-free).
-  if (isElectron && window.electronAPI?.httpApiCall) {
-    try {
-      const data = await callBackendJson(NOAH_BACKEND_URL, '/api/v1/hermes/chat', {
-        method: 'POST',
-        token,
-        body: payload,
-        includeByok: true,
-        timeoutMs: 240000,
-      });
-      onAction?.({ type: 'hermes', label: 'Hermes done', status: 'done' });
-      if (data?.session_id) {
-        try { localStorage.setItem('noah_hermes_session', data.session_id); } catch {}
-      }
-      return cleanAssistantOutput(data?.response) || 'Done.';
-    } catch (err) {
-      onAction?.({ type: 'hermes', label: 'Hermes error', status: 'error' });
-      throw new Error(`Hermes backend unreachable: ${err.message}`);
-    }
-  }
+  const postHermesJson = (reqBody) => callBackendJson(NOAH_BACKEND_URL, '/api/v1/hermes/chat', {
+    method: 'POST',
+    token,
+    body: reqBody,
+    includeByok: true,
+    timeoutMs: 240000,
+  });
 
   let resp;
   try {
@@ -709,12 +717,40 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
       signal: AbortSignal.timeout(180000),
     });
   } catch (err) {
-    onAction?.({ type: 'hermes', label: 'Hermes error', status: 'error' });
-    throw new Error(`Hermes backend unreachable: ${err.message}`);
+    // Fallback for environments where SSE fetch is unavailable.
+    try {
+      const data = await postHermesJson(payload);
+      onAction?.({ type: 'hermes', label: 'Hermes done', status: 'done' });
+      if (data?.session_id) {
+        try { localStorage.setItem('noah_hermes_session', data.session_id); } catch {}
+      }
+      return cleanAssistantOutput(data?.response) || 'Done.';
+    } catch (fallbackErr) {
+      onAction?.({ type: 'hermes', label: 'Hermes error', status: 'error' });
+      throw new Error(`Hermes request failed: ${fallbackErr.message || err.message}`);
+    }
   }
 
   if (!resp.ok) {
     const errBody = await resp.json().catch(() => ({}));
+    if (resp.status === 504) {
+      onAction?.({ type: 'hermes', label: 'Retrying with faster mode…', status: 'running' });
+      try {
+        const fastPayload = {
+          ...payload,
+          // Reduce context depth on retry to avoid gateway timeouts.
+          history: (payload.history || []).slice(-3),
+          // Fast fallback model for voice-like interactions.
+          model: 'openai/gpt-4.1-mini',
+        };
+        const data = await postHermesJson(fastPayload);
+        if (data?.session_id) {
+          try { localStorage.setItem('noah_hermes_session', data.session_id); } catch {}
+        }
+        onAction?.({ type: 'hermes', label: 'Hermes done', status: 'done' });
+        return cleanAssistantOutput(data?.response) || 'Done.';
+      } catch {}
+    }
     onAction?.({ type: 'hermes', label: 'Hermes error', status: 'error' });
     throw new Error(errBody.detail || `Hermes error ${resp.status}`);
   }
