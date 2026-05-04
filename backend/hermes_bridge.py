@@ -99,9 +99,19 @@ _agent_lock = threading.Lock()
 _agent_cache: Dict[tuple, AIAgent] = {}  # (uid, session_id) → AIAgent
 
 
+def _key_fingerprint(value: Optional[str]) -> str:
+    """Non-reversible short fingerprint for cache-change detection."""
+    if not value:
+        return ""
+    # Keep it simple and deterministic without exposing the full key.
+    return f"{len(value)}:{value[:6]}:{value[-4:]}"
+
+
 def _get_or_create_agent(
     uid: str,
     model: str = None,
+    api_key: str = None,
+    provider: str = None,
     system_prompt: str = None,
     session_id: str = None,
     tool_start_callback=None,
@@ -124,6 +134,10 @@ def _get_or_create_agent(
 
     with _agent_lock:
         cached = _agent_cache.get(cache_key)
+        requested_provider = (provider or "").strip().lower()
+        requested_key_fp = _key_fingerprint(api_key)
+        cached_provider = (getattr(cached, "_provider", "") or "").strip().lower() if cached else ""
+        cached_key_fp = _key_fingerprint(getattr(cached, "_api_key", None)) if cached else ""
 
         # Evict cached agent if the model has changed so the new model takes effect
         if cached is not None and cached.model != resolved_model:
@@ -138,9 +152,29 @@ def _get_or_create_agent(
             del _agent_cache[cache_key]
             cached = None
 
+        # Evict cached agent when BYOK provider/key changed. Some provider clients
+        # are initialized during agent construction; mutating attributes later is
+        # not always enough to refresh upstream auth headers.
+        if cached is not None and (
+            (requested_provider and requested_provider != cached_provider)
+            or (requested_key_fp and requested_key_fp != cached_key_fp)
+        ):
+            logger.info(
+                "Hermes BYOK changed for uid=%s session=%s: provider %s→%s key_fp %s→%s — recreating agent",
+                uid, session_id, cached_provider or "-", requested_provider or "-", cached_key_fp or "-", requested_key_fp or "-",
+            )
+            try:
+                cached._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            del _agent_cache[cache_key]
+            cached = None
+
         if cached is None:
             agent = AIAgent(
                 model=resolved_model,
+                api_key=api_key,
+                provider=provider,
                 quiet_mode=True,
                 ephemeral_system_prompt=system_prompt,
                 max_iterations=25,
@@ -167,6 +201,11 @@ def _get_or_create_agent(
                 agent.status_callback = status_callback
             if system_prompt and system_prompt != agent.ephemeral_system_prompt:
                 agent.ephemeral_system_prompt = system_prompt
+            # Refresh per-request auth/provider overrides (important for BYOK in thread pools).
+            if api_key:
+                agent._api_key = api_key
+            if provider:
+                agent._provider = provider
 
     return agent
 
@@ -178,6 +217,8 @@ def create_hermes_agent(
     session_id: str = None,
     uid: str = None,
     model: str = None,
+    api_key: str = None,
+    provider: str = None,
     tool_start_callback=None,
     tool_complete_callback=None,
     status_callback=None,
@@ -223,6 +264,8 @@ def create_hermes_agent(
         return _get_or_create_agent(
             uid=uid,
             model=model,
+            api_key=api_key,
+            provider=provider,
             system_prompt=system_prompt,
             session_id=session_id,
             tool_start_callback=tool_start_callback,
@@ -234,6 +277,8 @@ def create_hermes_agent(
     resolved_model = model or os.environ.get("NOAH_HERMES_MODEL", "claude-opus-4-20250514")
     agent = AIAgent(
         model=resolved_model,
+        api_key=api_key,
+        provider=provider,
         quiet_mode=True,
         ephemeral_system_prompt=system_prompt,
         max_iterations=25,
