@@ -342,6 +342,16 @@ export default function AssistantTab({ messages, setMessages }) {
       setIsHermesMode(mode === 'hermes');
     };
     loadBrainMode();
+    const onStorage = (e) => {
+      if (e.key === 'noah_brain_mode') loadBrainMode();
+    };
+    window.addEventListener('storage', onStorage);
+    const onFocus = () => loadBrainMode();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', onFocus);
+    };
   }, []);
 
   useEffect(() => {
@@ -544,7 +554,7 @@ export default function AssistantTab({ messages, setMessages }) {
         .filter(m => m.content && m.content !== WELCOME.content)
         .map(m => ({ role: m.role, content: m.content }));
 
-      const answer = await sendVoiceQuery(text, screen, token, onAction, history);
+      const answer = await sendVoiceQuery(text, screen, token, onAction, history, { voiceMode: !!voiceTriggered });
       setCurrentAction(null);
       console.log('[Noah] Received answer from sendVoiceQuery:', answer?.substring(0, 100));
 

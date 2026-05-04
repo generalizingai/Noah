@@ -15,6 +15,14 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
         self.clock_skew_allowance = self._get_timeout_from_env("HTTP_CLOCK_SKEW_ALLOWANCE", default=5 * 60)
 
         self.methods_timeout = self._parse_methods_timeout(methods_timeout or {})
+        # Long-running streaming/agent routes must not be cut off by generic HTTP
+        # method timeouts (these otherwise surface as intermittent 504s).
+        self.timeout_exempt_prefixes = self._parse_exempt_prefixes(
+            os.environ.get(
+                "HTTP_TIMEOUT_EXEMPT_PREFIXES",
+                "/api/v1/hermes/chat,/api/v1/hermes/tool_result",
+            )
+        )
 
     @staticmethod
     def _get_timeout_from_env(env_var: str, default: float) -> float:
@@ -35,6 +43,11 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
             except ValueError:
                 raise ValueError(f"Invalid timeout value for method {method}: {timeout}")
         return result
+
+    @staticmethod
+    def _parse_exempt_prefixes(raw: str) -> tuple:
+        parts = [p.strip() for p in (raw or "").split(",") if p.strip()]
+        return tuple(parts)
 
     async def dispatch(self, request: Request, call_next):
         # Check for stale request header first
@@ -60,6 +73,10 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
                     )
             except (ValueError, TypeError):
                 pass
+
+        path = request.url.path or ""
+        if any(path.startswith(prefix) for prefix in self.timeout_exempt_prefixes):
+            return await call_next(request)
 
         timeout = self.methods_timeout.get(request.method, self.default_timeout)
         try:

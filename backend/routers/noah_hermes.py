@@ -280,6 +280,7 @@ class HermesChatRequest(BaseModel):
     session_id: Optional[str] = None
     history: Optional[List[Dict[str, Any]]] = None
     model: Optional[str] = None  # client-selected model; overrides NOAH_HERMES_MODEL env var
+    latency_mode: Optional[str] = "balanced"  # balanced | realtime
 
 
 class HermesChatResponse(BaseModel):
@@ -291,6 +292,13 @@ class HermesChatResponse(BaseModel):
 
 class ToolResultRequest(BaseModel):
     result: Dict[str, Any]
+
+
+def _resolve_max_iterations(latency_mode: Optional[str]) -> int:
+    """Per-request iteration budget: faster for voice/realtime traffic."""
+    base = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS", "12"))
+    realtime = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS_REALTIME", "6"))
+    return realtime if (latency_mode or "").lower() == "realtime" else base
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -358,12 +366,24 @@ async def hermes_chat(
 
     accept = request.headers.get("accept", "")
     wants_sse = "text/event-stream" in accept
+    max_iterations = _resolve_max_iterations(req.latency_mode)
 
     if wants_sse:
-        return _hermes_chat_sse(agent, req, raw_session, model_used, history or [], session_id, uid)
+        return _hermes_chat_sse(
+            agent,
+            req,
+            raw_session,
+            model_used,
+            history or [],
+            session_id,
+            uid,
+            max_iterations,
+        )
 
     loop = asyncio.get_event_loop()
+    original_iterations = getattr(agent, "max_iterations", max_iterations)
     try:
+        agent.max_iterations = max_iterations
         result = await loop.run_in_executor(
             None,
             lambda: agent.run_conversation(
@@ -375,6 +395,8 @@ async def hermes_chat(
     except Exception as exc:
         logger.error("Hermes chat error uid=%s: %s", uid, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Hermes engine error: {exc}")
+    finally:
+        agent.max_iterations = original_iterations
 
     return HermesChatResponse(
         response=result["final_response"],
@@ -431,6 +453,7 @@ def _hermes_chat_sse(
     history: list,
     session_id: str,
     uid: str,
+    max_iterations: int,
 ) -> StreamingResponse:
     """Return a StreamingResponse that yields SSE events from the agent.
 
@@ -460,7 +483,9 @@ def _hermes_chat_sse(
     _register_emitter(session_id, event_queue.put)
 
     def run_agent():
+        original_iterations = getattr(agent, "max_iterations", max_iterations)
         try:
+            agent.max_iterations = max_iterations
             agent.run_conversation_streaming(
                 user_message=req.message,
                 callback=event_queue.put,
@@ -470,6 +495,7 @@ def _hermes_chat_sse(
         except Exception as exc:
             event_queue.put({"type": "error", "message": str(exc)})
         finally:
+            agent.max_iterations = original_iterations
             event_queue.put(_SENTINEL)
 
     thread = threading.Thread(target=run_agent, daemon=True)

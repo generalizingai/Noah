@@ -222,7 +222,7 @@ export default function FloatingBar() {
     try {
       const token  = user ? await getToken() : null;
       const screen = null; // Keep voice path low-latency; no automatic screenshot capture.
-      const answer = await sendVoiceQuery(t, screen, token, () => {});
+      const answer = await sendVoiceQuery(t, screen, token, () => {}, [], { voiceMode: true });
       setResponse(answer);
       setPhase('response');
       broadcastQA(t, answer);
