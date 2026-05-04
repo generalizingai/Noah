@@ -400,6 +400,8 @@ Execution policy:
 2. If the user asks you to perform an action, execute it with tools instead of only giving instructions.
 3. If the user shares personal preferences/facts, call save_memory with concise facts.
 4. Use only the tools that are needed; do not call tools for simple chit-chat.
+5. For macOS app tasks, use run_applescript first. If needed, use System Events UI scripting or terminal/osascript for automation.
+6. Do not say "I can only open the app". Attempt control steps first, then report what succeeded/failed.
 
 Available native apps:
 ${nativeLines.length > 0 ? nativeLines.join('\n') : '- None enabled yet'}
@@ -606,7 +608,6 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
       signal: AbortSignal.timeout(isVoiceMode ? 120000 : 180000),
     });
   } catch (err) {
-    onAction?.({ type: 'hermes', label: 'SSE unavailable, switching mode…', status: 'running' });
     // Fallback for environments where SSE fetch is unavailable.
     try {
       const data = await postHermesJson(payload, isVoiceMode ? 120000 : 240000);
