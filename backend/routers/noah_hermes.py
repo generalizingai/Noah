@@ -294,6 +294,12 @@ class ToolResultRequest(BaseModel):
     result: Dict[str, Any]
 
 
+class HermesWarmupRequest(BaseModel):
+    session_id: Optional[str] = None
+    model: Optional[str] = None
+    latency_mode: Optional[str] = "balanced"
+
+
 def _resolve_max_iterations(latency_mode: Optional[str]) -> int:
     """Per-request iteration budget: faster for voice/realtime traffic."""
     base = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS", "12"))
@@ -404,6 +410,45 @@ async def hermes_chat(
         mode="hermes",
         model=model_used,
     )
+
+
+@router.post("/warmup")
+async def hermes_warmup(
+    request: Request,
+    req: HermesWarmupRequest,
+    uid: str = Depends(auth.get_current_user_uid),
+):
+    """
+    Warm Hermes session/agent without issuing an LLM generation.
+    Reduces first-message latency by pre-initializing session DB and tools.
+    """
+    _require_hermes_mode()
+    try:
+        from hermes_bridge import create_hermes_agent
+    except ImportError as exc:
+        logger.error("Failed to import hermes_bridge for warmup: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Hermes engine unavailable: {exc}")
+
+    raw_session = req.session_id or str(uuid.uuid4())
+    session_id = f"{uid}:{raw_session}"
+    model_used = req.model or os.environ.get("NOAH_HERMES_MODEL", "google/gemma-4-31b-it")
+    provider_override, api_key_override = _resolve_provider_and_key(request, model_used)
+
+    # Create/reuse agent and session record; no model call is made here.
+    create_hermes_agent(
+        system_prompt=None,
+        session_id=session_id,
+        uid=uid,
+        model=model_used,
+        provider=provider_override,
+        api_key=api_key_override,
+    )
+    return {
+        "ok": True,
+        "session_id": raw_session,
+        "model": model_used,
+        "latency_mode": req.latency_mode or "balanced",
+    }
 
 
 @router.post("/tool_result/{call_id}")

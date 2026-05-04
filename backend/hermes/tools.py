@@ -51,7 +51,7 @@ def _run_shell(command: str, reason: str = "") -> Dict[str, Any]:
         return {
             "note": (
                 "terminal is executed by the Noah desktop app on your Mac. "
-                "The command has been queued; ensure the desktop app is running. "
+                "If this did not run, the realtime desktop channel may be disconnected. "
                 f"command={command!r}"
             ),
             "desktop_proxy": True,
@@ -83,8 +83,8 @@ def _run_applescript(script: str, reason: str = "") -> Dict[str, Any]:
     if not _IS_MACOS:
         return {
             "error": (
-                "AppleScript requires the Noah desktop app to be running on your Mac. "
-                "Please open the Noah desktop app so this tool can execute on your machine."
+                "AppleScript executes through Noah desktop on your Mac. "
+                "If Noah is already open, reconnect Hermes so the realtime desktop channel is active."
             ),
             "desktop_proxy_required": True,
         }
@@ -304,8 +304,8 @@ def _show_notification(title: str, body: str) -> Dict[str, Any]:
     if not _IS_MACOS:
         return {
             "error": (
-                "show_notification requires the Noah desktop app to be running on your Mac. "
-                "Please open the Noah desktop app so this tool can display notifications."
+                "show_notification executes through Noah desktop on your Mac. "
+                "If Noah is already open, reconnect Hermes so the realtime desktop channel is active."
             ),
             "desktop_proxy_required": True,
             "title": title,
@@ -320,8 +320,8 @@ def _open_url(url: str, reason: str = "") -> Dict[str, Any]:
     if not _IS_MACOS:
         return {
             "error": (
-                "open_url requires the Noah desktop app to be running on your Mac. "
-                "Please open the Noah desktop app so this tool can open URLs in your browser."
+                "open_url executes through Noah desktop on your Mac. "
+                "If Noah is already open, reconnect Hermes so the realtime desktop channel is active."
             ),
             "desktop_proxy_required": True,
             "url": url,
@@ -335,8 +335,8 @@ def _open_path(path: str, reason: str = "") -> Dict[str, Any]:
     if not _IS_MACOS:
         return {
             "error": (
-                "open_path requires the Noah desktop app to be running on your Mac. "
-                "Please open the Noah desktop app so this tool can open files."
+                "open_path executes through Noah desktop on your Mac. "
+                "If Noah is already open, reconnect Hermes so the realtime desktop channel is active."
             ),
             "desktop_proxy_required": True,
             "path": path,

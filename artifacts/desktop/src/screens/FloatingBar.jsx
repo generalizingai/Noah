@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuth } from '../services/auth';
-import { sendVoiceQuery } from '../services/noahApi';
+import { sendVoiceQuery, getHermesBrainMode, warmupHermes } from '../services/noahApi';
 import { VoiceRecorder } from '../services/voiceRecorder';
 import { PTTManager, getPTTKeyLabel, getPTTKeyCode } from '../services/ptt';
 import { speak, stopSpeaking, isTTSAvailable, onSpeakingStateChange } from '../services/tts';
@@ -89,6 +89,7 @@ export default function FloatingBar() {
   const dismissTimer  = useRef(null);
   const inputRef      = useRef(null);
   const liveStreamRef = useRef(null); // persistent mic stream — keeps getUserMedia permission "warm"
+  const hermesWarmedRef = useRef(false);
 
   const isListening    = micStatus === 'listening';
   const isTranscribing = micStatus === 'transcribing';
@@ -352,6 +353,22 @@ export default function FloatingBar() {
     });
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    if (!user || hermesWarmedRef.current) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const mode = await getHermesBrainMode();
+        if (cancelled || mode !== 'hermes') return;
+        const token = await getToken();
+        if (cancelled) return;
+        await warmupHermes(token, { voiceMode: true });
+        hermesWarmedRef.current = true;
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [user, getToken]);
 
   useEffect(() => {
     if (!isElectron) return;

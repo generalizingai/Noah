@@ -129,6 +129,39 @@ export async function getHermesBackendStatus() {
   };
 }
 
+let _hermesWarmupPromise = null;
+
+export async function warmupHermes(token, { voiceMode = false } = {}) {
+  if (!token) return null;
+  if (_hermesWarmupPromise) return _hermesWarmupPromise;
+
+  const model = voiceMode ? getHermesVoiceModel() : getHermesModel();
+  let sessionId;
+  try { sessionId = localStorage.getItem('noah_hermes_session') || undefined; } catch {}
+
+  _hermesWarmupPromise = callBackendJson(NOAH_BACKEND_URL, '/api/v1/hermes/warmup', {
+    method: 'POST',
+    token,
+    includeByok: true,
+    timeoutMs: 12000,
+    body: {
+      session_id: sessionId || undefined,
+      model,
+      latency_mode: voiceMode ? 'realtime' : 'balanced',
+    },
+  }).then((data) => {
+    if (data?.session_id) {
+      try { localStorage.setItem('noah_hermes_session', data.session_id); } catch {}
+    }
+    return data;
+  }).catch((err) => {
+    _hermesWarmupPromise = null;
+    throw err;
+  });
+
+  return _hermesWarmupPromise;
+}
+
 export async function getHermesBrainMode() {
   try {
     const localMode = localStorage.getItem('noah_brain_mode');

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../services/auth';
-import { analyzeScreenshot, sendVoiceQuery, getHermesSessions, getHermesSessionHistory, getHermesBrainMode } from '../services/noahApi';
+import { analyzeScreenshot, sendVoiceQuery, getHermesSessions, getHermesSessionHistory, getHermesBrainMode, warmupHermes } from '../services/noahApi';
 import { VoiceRecorder } from '../services/voiceRecorder';
 import { speak, stopSpeaking, isTTSAvailable, onSpeakingStateChange } from '../services/tts';
 import { PTTManager, getPTTKeyLabel } from '../services/ptt';
@@ -181,6 +181,7 @@ export default function AssistantTab({ messages, setMessages }) {
   const sendingRef     = useRef(false); // mutex — prevents double-send from concurrent PTT/IPC events
   const streamingRef   = useRef(false); // true while SSE streaming is in progress
   const isRecordingRef = useRef(false); // prevents multiple recorder instances
+  const hermesWarmedRef = useRef(false);
 
   const scrollToBottom = () => bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
 
@@ -262,6 +263,21 @@ export default function AssistantTab({ messages, setMessages }) {
     });
     return unsubscribe;
   }, []);
+
+  // Warm Hermes once in background so first user message is faster.
+  useEffect(() => {
+    if (!isHermesMode || hermesWarmedRef.current || !user) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await getToken();
+        if (cancelled) return;
+        await warmupHermes(token, { voiceMode: false });
+        hermesWarmedRef.current = true;
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [isHermesMode, user, getToken]);
 
   // ── Voice recorder ──────────────────────────────────────────────────────────
   const getRecorder = useCallback(() => {
