@@ -360,7 +360,7 @@ def _make_remote_proxy_handler(tool_name: str, session_id: str, uid: str):
 # ── Request / Response models ────────────────────────────────────────────────
 
 class HermesChatRequest(BaseModel):
-    message: str
+    message: Any
     system_prompt: Optional[str] = None
     session_id: Optional[str] = None
     history: Optional[List[Dict[str, Any]]] = None
@@ -431,6 +431,22 @@ def _resolve_max_iterations(latency_mode: Optional[str]) -> int:
     base = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS", "12"))
     realtime = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS_REALTIME", "4"))
     return realtime if (latency_mode or "").lower() == "realtime" else base
+
+
+def _extract_message_text(message: Any) -> str:
+    """Best-effort text extraction from plain or multimodal message payloads."""
+    if isinstance(message, str):
+        return message
+    if isinstance(message, list):
+        parts: List[str] = []
+        for item in message:
+            if isinstance(item, dict):
+                if item.get("type") in {"text", "input_text"}:
+                    txt = item.get("text")
+                    if isinstance(txt, str):
+                        parts.append(txt)
+        return " ".join(parts).strip()
+    return str(message or "")
 
 
 def _tool_error_payload(error_code: str, message: str, recoverable: bool, next_action: str = "") -> Dict[str, Any]:
@@ -520,6 +536,57 @@ async def hermes_status():
     }
 
 
+@router.get("/bridge/sse")
+async def desktop_bridge_sse(
+    request: Request,
+    session_id: Optional[str] = None,
+    uid: str = Depends(auth.get_current_user_uid),
+):
+    """
+    Lightweight authenticated desktop bridge stream.
+    Keeps a live SSE channel registered so capabilities can report desktop_bridge
+    as connected even when no active /hermes/chat request is running.
+    """
+    raw_session = (session_id or "bridge").strip() or "bridge"
+    scoped_session = f"{uid}:{raw_session}"
+    event_queue: queue.Queue = queue.Queue()
+
+    _register_emitter(scoped_session, event_queue.put)
+
+    async def generate():
+        loop = asyncio.get_event_loop()
+        try:
+            # Initial ack event for diagnostics.
+            yield f"data: {json.dumps({'type': 'bridge_ready', 'session_id': raw_session})}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    # Do not block FastAPI's event loop while waiting for bridge
+                    # events. A blocking Queue.get here can make /health,
+                    # /status, memories, skills, and chat appear offline while a
+                    # desktop bridge stream is connected.
+                    evt = await loop.run_in_executor(
+                        None,
+                        lambda: event_queue.get(timeout=20),
+                    )
+                    yield f"data: {json.dumps(evt)}\n\n"
+                except queue.Empty:
+                    # Keepalive ping to prevent intermediary idle disconnects.
+                    yield ": ping\n\n"
+        finally:
+            _unregister_emitter(scoped_session, event_queue.put)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/capabilities")
 async def hermes_capabilities(uid: str = Depends(auth.get_current_user_uid)):
     mode = _brain_mode()
@@ -536,7 +603,7 @@ async def hermes_capabilities(uid: str = Depends(auth.get_current_user_uid)):
         if path.stem not in seen:
             skill_rows.append(_skill_info(path, "shared"))
 
-    worker_enabled = os.environ.get("NOAH_WORKER_AGENTS_ENABLED", "false").lower() == "true"
+    worker_enabled = os.environ.get("NOAH_WORKER_AGENTS_ENABLED", "true").lower() == "true"
     try:
         from hermes.tools import TOOL_SCHEMAS
         exposed_tools = sorted(TOOL_SCHEMAS.keys())
@@ -641,7 +708,7 @@ async def hermes_chat(
     raw_session = req.session_id or str(uuid.uuid4())
     session_id = f"{uid}:{raw_session}"
 
-    msg = (req.message or "").strip()
+    msg = _extract_message_text(req.message).strip()
     msg_l = msg.lower()
 
     # Deterministic capability route to prevent model-side hallucinations on
@@ -702,7 +769,7 @@ async def hermes_chat(
         )
 
     # Hard guard: for capability-intent questions, force capability grounding.
-    if _CAPABILITY_QUERY_RE.search(req.message or ""):
+    if _CAPABILITY_QUERY_RE.search(msg):
         guard = (
             "\n\nCapability guard:\n"
             "- You MUST call get_capabilities before answering this user message.\n"
@@ -1179,7 +1246,7 @@ async def delete_skill(slug: str, uid: str = Depends(auth.get_current_user_uid))
 
 
 def _workers_enabled() -> bool:
-    return os.environ.get("NOAH_WORKER_AGENTS_ENABLED", "false").lower() == "true"
+    return os.environ.get("NOAH_WORKER_AGENTS_ENABLED", "true").lower() == "true"
 
 
 @router.post("/workers")

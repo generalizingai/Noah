@@ -1,5 +1,5 @@
 import { getOpenAIKey, getDeepgramKey, getOpenRouterKey, getSystemInstructions, getIntegrations } from './keys';
-import { buildMemoryContext, addMemory } from './memory';
+import { buildMemoryContext, addMemory, getAllMemories } from './memory';
 
 function getByokHeaders() {
   const headers = {};
@@ -55,51 +55,113 @@ function backendCandidates() {
   return [...set];
 }
 
+function isRetryableBackendError(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('network') ||
+    msg.includes('econnrefused') ||
+    msg.includes('enotfound') ||
+    msg.includes('socket hang up') ||
+    msg.includes('backend request failed') ||
+    msg.includes('request failed')
+  );
+}
+
+function isScreenInspectionQuestion(text = '') {
+  const value = String(text || '').toLowerCase();
+  return /\b(screen|watch|see|visible|looking at|look at|frontmost|current window|on my screen|what do you see)\b/.test(value);
+}
+
+function localMemoryRows() {
+  return getAllMemories().map((m) => ({
+    id: m.id,
+    content: m.text || m.content || '',
+    created_at: m.created_at || Date.now(),
+    source: 'local_fallback',
+    sync_status: 'pending_backend',
+  }));
+}
+
+function mergeMemoryRows(serverRows = []) {
+  const rows = Array.isArray(serverRows) ? serverRows : [];
+  const seen = new Set(rows.map((m) => String(m.content || m.text || '').trim().toLowerCase()).filter(Boolean));
+  const local = localMemoryRows().filter((m) => {
+    const key = String(m.content || '').trim().toLowerCase();
+    return key && !seen.has(key);
+  });
+  return [...local, ...rows];
+}
+
 async function callBackendJson(base, path, { method = 'GET', token = null, body = null, includeByok = false, accept = 'application/json', timeoutMs = 20000 } = {}) {
-  const url = `${base}${path}`;
-  const headers = {
-    Accept: accept,
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(includeByok ? getByokHeaders() : {}),
-    ...(body ? { 'Content-Type': 'application/json' } : {}),
+  const perform = async (activeBase) => {
+    const url = `${activeBase}${path}`;
+    const headers = {
+      Accept: accept,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(includeByok ? getByokHeaders() : {}),
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    };
+
+    // In Electron, always use main-process HTTP to bypass renderer CORS.
+    if (isElectron && window.electronAPI?.httpApiCall) {
+      const out = await window.electronAPI.httpApiCall({
+        method,
+        url,
+        headers,
+        body,
+        timeoutMs,
+      });
+      if (!out?.success) throw new Error((out?.error || '').trim() || 'Backend request failed');
+      if ((out.statusCode || 500) >= 400) {
+        const raw =
+          typeof out.data === 'string'
+            ? out.data.trim()
+            : (
+                out.data?.detail ||
+                out.data?.message ||
+                out.data?.error ||
+                ''
+              );
+        const msg = raw || `HTTP ${out.statusCode}${out.statusMessage ? ` ${out.statusMessage}` : ''}`;
+        throw new Error(msg);
+      }
+      return out.data;
+    }
+
+    const resp = await fetch(url, {
+      method,
+      headers,
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    return resp.json();
   };
 
-  // In Electron, always use main-process HTTP to bypass renderer CORS.
-  if (isElectron && window.electronAPI?.httpApiCall) {
-    const out = await window.electronAPI.httpApiCall({
-      method,
-      url,
-      headers,
-      body,
-      timeoutMs,
-    });
-    if (!out?.success) throw new Error((out?.error || '').trim() || 'Backend request failed');
-    if ((out.statusCode || 500) >= 400) {
-      const raw =
-        typeof out.data === 'string'
-          ? out.data.trim()
-          : (
-              out.data?.detail ||
-              out.data?.message ||
-              out.data?.error ||
-              ''
-            );
-      const msg = raw || `HTTP ${out.statusCode}${out.statusMessage ? ` ${out.statusMessage}` : ''}`;
-      throw new Error(msg);
+  const initialBase = String(base || NOAH_BACKEND_URL || '').trim();
+  try {
+    return await perform(initialBase);
+  } catch (err) {
+    // Keep hard auth/validation errors immediate; only fail over on connectivity/timeout issues.
+    if (!isRetryableBackendError(err)) throw err;
+    for (const candidate of backendCandidates()) {
+      if (!candidate || candidate === initialBase) continue;
+      try {
+        const out = await perform(candidate);
+        NOAH_BACKEND_URL = candidate;
+        return out;
+      } catch (candidateErr) {
+        if (!isRetryableBackendError(candidateErr)) throw candidateErr;
+      }
     }
-    return out.data;
+    throw err;
   }
-
-  const resp = await fetch(url, {
-    method,
-    headers,
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err.detail || `HTTP ${resp.status}`);
-  }
-  return resp.json();
 }
 
 function _recordTrace(event, data = {}) {
@@ -360,6 +422,88 @@ function getHermesVoiceModel() {
 }
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
+
+// ─── Persistent desktop bridge SSE (separate from /hermes/chat streaming) ───
+let _bridgeStreamId = null;
+let _bridgeStreamUnsub = null;
+let _bridgeReconnectTimer = null;
+let _bridgeToken = null;
+
+function _clearBridgeReconnect() {
+  if (_bridgeReconnectTimer) {
+    clearTimeout(_bridgeReconnectTimer);
+    _bridgeReconnectTimer = null;
+  }
+}
+
+async function _stopDesktopBridgeInternal() {
+  _clearBridgeReconnect();
+  try { _bridgeStreamUnsub?.(); } catch {}
+  _bridgeStreamUnsub = null;
+  if (_bridgeStreamId && window.electronAPI?.httpApiStreamStop) {
+    try { await window.electronAPI.httpApiStreamStop({ streamId: _bridgeStreamId }); } catch {}
+  }
+  _bridgeStreamId = null;
+}
+
+function _scheduleBridgeReconnect() {
+  if (!_bridgeToken || !isElectron) return;
+  if (_bridgeReconnectTimer) return;
+  _bridgeReconnectTimer = setTimeout(() => {
+    _bridgeReconnectTimer = null;
+    ensureDesktopBridge(_bridgeToken).catch(() => {});
+  }, 1500);
+}
+
+export async function stopDesktopBridge() {
+  _bridgeToken = null;
+  await _stopDesktopBridgeInternal();
+}
+
+export async function ensureDesktopBridge(token) {
+  if (!isElectron || !window.electronAPI?.httpApiStreamStart || !window.electronAPI?.onHttpApiStreamEvent) return false;
+  if (!token) return false;
+  _bridgeToken = token;
+
+  if (_bridgeStreamId) return true;
+
+  const streamId = `bridge_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  _bridgeStreamId = streamId;
+  const sessionHint = (localStorage.getItem('noah_hermes_session') || 'bridge').trim() || 'bridge';
+
+  _bridgeStreamUnsub = window.electronAPI.onHttpApiStreamEvent((msg) => {
+    if (!msg || msg.streamId !== streamId) return;
+    if (msg.type === 'http_error' || msg.type === 'error' || msg.type === 'end') {
+      _bridgeStreamId = null;
+      try { _bridgeStreamUnsub?.(); } catch {}
+      _bridgeStreamUnsub = null;
+      _scheduleBridgeReconnect();
+    }
+  });
+
+  try {
+    const started = await window.electronAPI.httpApiStreamStart({
+      streamId,
+      method: 'GET',
+      url: `${NOAH_BACKEND_URL}/api/v1/hermes/bridge/sse?session_id=${encodeURIComponent(sessionHint)}`,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'text/event-stream',
+      },
+      timeoutMs: 86400000,
+    });
+    if (!started?.ok) {
+      await _stopDesktopBridgeInternal();
+      _scheduleBridgeReconnect();
+      return false;
+    }
+    return true;
+  } catch {
+    await _stopDesktopBridgeInternal();
+    _scheduleBridgeReconnect();
+    return false;
+  }
+}
 
 // ─── Cached system info ───────────────────────────────────────────────────────
 
@@ -1016,13 +1160,17 @@ async function listMemoriesFromBackend(token, limit = 100) {
       includeByok: true,
       timeoutMs: 25000,
     });
-    return { success: true, memories: Array.isArray(data) ? data : [], count: Array.isArray(data) ? data.length : 0 };
+    const memories = mergeMemoryRows(Array.isArray(data) ? data : []);
+    return { success: true, memories, count: memories.length };
   } catch (err) {
-    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, err.message || 'Could not list memories.', {
-      plane: 'server',
-      recoverable: true,
-      nextAction: 'Check backend connectivity and retry.',
-    });
+    const local = localMemoryRows();
+    return {
+      success: true,
+      memories: local,
+      count: local.length,
+      source: 'local_fallback',
+      warning: err.message || 'Backend memory store unavailable.',
+    };
   }
 }
 
@@ -1062,11 +1210,23 @@ async function saveMemoryToBackend(fact, token) {
       source: 'backend',
     };
   } catch (err) {
-    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, err.message || 'Failed to save memory.', {
-      plane: 'server',
-      recoverable: true,
-      nextAction: 'Retry memory save once backend is reachable.',
-    });
+    addMemory(trimmed);
+    const local = getAllMemories()[0] || {};
+    return {
+      success: true,
+      id: local.id || `local_${Date.now()}`,
+      memory: {
+        id: local.id || `local_${Date.now()}`,
+        content: trimmed,
+        created_at: local.created_at || Date.now(),
+        source: 'local_fallback',
+        sync_status: 'pending_backend',
+      },
+      fact: trimmed,
+      category: 'manual',
+      source: 'local_fallback',
+      warning: err.message || 'Backend memory store unavailable; saved locally.',
+    };
   }
 }
 
@@ -1594,7 +1754,7 @@ ${memories ? `${memories}\n\n` : ''}${custom ? `User instructions:\n${custom}\n\
 - Shell: ${sysInfo?.shell || '/bin/zsh'}
 - Date: ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
 - Time: ${new Date().toLocaleTimeString('en-US')}
-${hasScreen ? '- A screenshot is attached for this turn.' : ''}
+${hasScreen ? '- A screenshot is attached for this turn. If the user asks what is visible/on screen, answer from the screenshot. Do not claim you cannot watch or inspect the screen. If details are unreadable, say what is visible and what is unclear.' : ''}
 ${capabilities ? `- Capability snapshot: desktop_bridge=${capabilities.desktop_bridge?.available ? 'online' : (capabilities.desktop_bridge?.state || 'offline')}, local_vscode=${capabilities.local_vscode?.available ? 'yes' : 'no'}, local_playwright=${capabilities.local_playwright?.available ? 'yes' : 'no'}, codespaces_auth=${capabilities.github_codespaces_auth?.available ? 'yes' : 'no'}` : ''}
 ${capabilities?.skills ? `- Skills installed: ${capabilities.skills.count || 0}${(capabilities.skills.sample || []).length ? ` (sample: ${(capabilities.skills.sample || []).join(', ')})` : ''}` : ''}
 
@@ -1850,7 +2010,7 @@ async function executeAndReportTool(callId, toolName, args, token) {
   }
 }
 
-async function streamHermesViaElectron(payload, token, onAction, isVoiceMode) {
+async function streamHermesViaElectron(payload, token, onAction, isVoiceMode, baseUrl = NOAH_BACKEND_URL) {
   if (!isElectron || !window.electronAPI?.httpApiStreamStart || !window.electronAPI?.onHttpApiStreamEvent) {
     throw new Error('Electron stream bridge unavailable');
   }
@@ -1941,7 +2101,7 @@ async function streamHermesViaElectron(payload, token, onAction, isVoiceMode) {
     window.electronAPI.httpApiStreamStart({
       streamId,
       method: 'POST',
-      url: `${NOAH_BACKEND_URL}/api/v1/hermes/chat`,
+      url: `${baseUrl}/api/v1/hermes/chat`,
       headers: backendHeaders(token, { Accept: 'text/event-stream' }),
       body: payload,
       timeoutMs: isVoiceMode ? 120000 : 180000,
@@ -1985,7 +2145,12 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
   try { sessionId = localStorage.getItem('noah_hermes_session') || undefined; } catch {}
 
   const payload = {
-    message: transcript,
+    message: screenBase64
+      ? [
+          { type: 'image_url', image_url: { url: screenBase64, detail: 'high' } },
+          { type: 'text', text: transcript },
+        ]
+      : transcript,
     system_prompt: system,
     session_id: sessionId || undefined,
     model: isVoiceMode ? getHermesVoiceModel() : getHermesModel(),
@@ -2017,12 +2182,20 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
   // Packaged app loads on app://localhost. Browser fetch to HTTPS can fail CORS
   // preflight for custom BYOK headers, so prefer the main-process stream bridge.
   if (isElectron && window.electronAPI?.httpApiStreamStart) {
-    try {
-      return await streamHermesViaElectron(payload, token, onAction, isVoiceMode);
-    } catch (err) {
-      console.warn('[Noah] Electron Combat stream failed, falling back:', err.message);
-      // Fall through to legacy fetch/json path below.
+    let lastStreamErr = null;
+    for (const candidate of backendCandidates()) {
+      try {
+        const result = await streamHermesViaElectron(payload, token, onAction, isVoiceMode, candidate);
+        NOAH_BACKEND_URL = candidate;
+        return result;
+      } catch (err) {
+        lastStreamErr = err;
+        console.warn('[Noah] Electron Combat stream failed for', candidate, ':', err.message);
+        if (!isRetryableBackendError(err)) break;
+      }
     }
+    console.warn('[Noah] Electron Combat stream failed, falling back:', lastStreamErr?.message);
+    // Fall through to legacy fetch/json path below.
   }
 
   let resp;
@@ -2247,6 +2420,18 @@ export async function getHermesSessionHistory(sessionId, token) {
 
 // history: array of { role: 'user'|'assistant', content: string } from previous turns
 export async function sendVoiceQuery(transcript, screenBase64, token, onAction, history = [], options = {}) {
+  if (screenBase64 && isScreenInspectionQuestion(transcript)) {
+    try {
+      onAction?.({ type: 'vision', label: 'Inspecting screen...', status: 'running', plane: 'device' });
+      const result = await analyzeScreenshot(screenBase64, token, transcript);
+      onAction?.({ type: 'vision', label: 'Screen inspected', status: 'done', plane: 'device' });
+      return result.insight || 'I could not read the screen clearly.';
+    } catch (err) {
+      console.warn('[Noah] Direct screen inspection failed, falling back to chat path:', err.message);
+      onAction?.({ type: 'vision', label: 'Screen inspection fallback', status: 'error', plane: 'device' });
+    }
+  }
+
   // ── Hermes brain mode: route to backend Hermes engine ──────────────────────
   const brainMode = await getHermesBrainMode();
   if (brainMode === 'hermes') {
@@ -2381,6 +2566,7 @@ export async function listSkills(token) {
     method: 'GET',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2389,6 +2575,7 @@ export async function getSkill(slug, token) {
     method: 'GET',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2397,6 +2584,7 @@ export async function installSkill(content, scope = 'user', token) {
     method: 'POST',
     token,
     includeByok: true,
+    timeoutMs: 60000,
     body: { content, scope },
   });
 }
@@ -2406,24 +2594,45 @@ export async function deleteSkill(slug, token) {
     method: 'DELETE',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
 export async function getBackendMemories(token, { limit = 5000, offset = 0 } = {}) {
-  return callBackendJson(NOAH_BACKEND_URL, `/v3/memories?limit=${Math.max(1, Math.min(5000, Number(limit || 5000)))}&offset=${Math.max(0, Number(offset || 0))}`, {
-    method: 'GET',
-    token,
-    includeByok: true,
-  });
+  try {
+    const rows = await callBackendJson(NOAH_BACKEND_URL, `/v3/memories?limit=${Math.max(1, Math.min(5000, Number(limit || 5000)))}&offset=${Math.max(0, Number(offset || 0))}`, {
+      method: 'GET',
+      token,
+      includeByok: true,
+      timeoutMs: 60000,
+    });
+    return mergeMemoryRows(rows);
+  } catch (err) {
+    return localMemoryRows();
+  }
 }
 
 export async function createBackendMemory(content, token) {
-  return callBackendJson(NOAH_BACKEND_URL, '/v3/memories', {
-    method: 'POST',
-    token,
-    includeByok: true,
-    body: { content, category: 'manual', visibility: 'private' },
-  });
+  const trimmed = String(content || '').trim();
+  try {
+    return await callBackendJson(NOAH_BACKEND_URL, '/v3/memories', {
+      method: 'POST',
+      token,
+      includeByok: true,
+      timeoutMs: 60000,
+      body: { content: trimmed, category: 'manual', visibility: 'private' },
+    });
+  } catch (err) {
+    addMemory(trimmed);
+    const local = getAllMemories()[0] || {};
+    return {
+      id: local.id || `local_${Date.now()}`,
+      content: trimmed,
+      created_at: local.created_at || Date.now(),
+      source: 'local_fallback',
+      sync_status: 'pending_backend',
+    };
+  }
 }
 
 export async function deleteBackendMemory(memoryId, token) {
@@ -2431,6 +2640,7 @@ export async function deleteBackendMemory(memoryId, token) {
     method: 'DELETE',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2439,6 +2649,7 @@ export async function updateBackendMemory(memoryId, value, token) {
     method: 'PATCH',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2447,6 +2658,7 @@ export async function createWorkerAgent(payload, token) {
     method: 'POST',
     token,
     includeByok: true,
+    timeoutMs: 60000,
     body: payload,
   });
 }
@@ -2456,6 +2668,7 @@ export async function listWorkerAgents(token) {
     method: 'GET',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2464,6 +2677,7 @@ export async function getWorkerAgent(workerId, token) {
     method: 'GET',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2472,6 +2686,7 @@ export async function updateWorkerAgent(workerId, payload, token) {
     method: 'PATCH',
     token,
     includeByok: true,
+    timeoutMs: 60000,
     body: payload,
   });
 }
@@ -2481,6 +2696,7 @@ export async function deleteWorkerAgent(workerId, token) {
     method: 'DELETE',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2489,6 +2705,7 @@ export async function runWorkerAgent(workerId, payload, token) {
     method: 'POST',
     token,
     includeByok: true,
+    timeoutMs: 120000,
     body: payload,
   });
 }
@@ -2498,6 +2715,7 @@ export async function getWorkerAgentStatus(workerId, token) {
     method: 'GET',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2506,6 +2724,7 @@ export async function getWorkerAgentResult(workerId, token) {
     method: 'GET',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2514,6 +2733,7 @@ export async function getWorkerMemories(workerId, token) {
     method: 'GET',
     token,
     includeByok: true,
+    timeoutMs: 60000,
   });
 }
 
@@ -2522,6 +2742,7 @@ export async function addWorkerMemory(workerId, payload, token) {
     method: 'POST',
     token,
     includeByok: true,
+    timeoutMs: 60000,
     body: payload,
   });
 }
