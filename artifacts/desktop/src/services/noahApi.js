@@ -461,6 +461,13 @@ export async function stopDesktopBridge() {
 }
 
 export async function ensureDesktopBridge(token) {
+  const bridgeEnabled = (() => {
+    try { return localStorage.getItem('noah_enable_desktop_bridge_sse') === 'true'; } catch { return false; }
+  })();
+  if (!bridgeEnabled) {
+    await _stopDesktopBridgeInternal();
+    return false;
+  }
   if (!isElectron || !window.electronAPI?.httpApiStreamStart || !window.electronAPI?.onHttpApiStreamEvent) return false;
   if (!token) return false;
   _bridgeToken = token;
