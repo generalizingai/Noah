@@ -58,6 +58,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Task execution
   runShell:           (command)   => ipcRenderer.invoke('run-shell', command),
+  runShellLong:       (payload)   => ipcRenderer.invoke('run-shell-long', payload),
+  checkPlaywright:    ()          => ipcRenderer.invoke('check-playwright'),
   runApplescript:     (script)    => ipcRenderer.invoke('run-applescript', script),
   readFile:           (filePath)  => ipcRenderer.invoke('read-file', filePath),
   writeFile:          (fp, c)     => ipcRenderer.invoke('write-file', { filePath: fp, content: c }),
@@ -68,6 +70,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Network (bypasses browser CORS)
   fetchUrl:           (url)       => ipcRenderer.invoke('fetch-url', url),
   httpApiCall:        (opts)      => ipcRenderer.invoke('http-api-call', opts),
+  httpApiStreamStart: (opts)      => ipcRenderer.invoke('http-api-stream-start', opts),
+  httpApiStreamStop:  (opts)      => ipcRenderer.invoke('http-api-stream-stop', opts),
+  onHttpApiStreamEvent: (cb)      => {
+    const listener = (_, data) => cb(data);
+    ipcRenderer.on('http-api-stream-event', listener);
+    return () => ipcRenderer.removeListener('http-api-stream-event', listener);
+  },
   synthesizeTTS:      (opts)      => ipcRenderer.invoke('synthesize-tts', opts),
 
   // Brain mode IPC signal — notifies main process of Classic/Hermes mode change

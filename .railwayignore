@@ -1,0 +1,19 @@
+# Exclude local/system junk
+**/.DS_Store
+**/.vscode/
+**/.idea/
+
+# Exclude local backups
+.migration-backup/
+backend/.migration-backup/
+
+# Exclude frontend/desktop build artifacts from backend deploy snapshot
+artifacts/
+**/node_modules/
+**/dist/
+
+# Exclude git metadata and caches
+.git/
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc

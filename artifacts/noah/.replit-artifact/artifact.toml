@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Omi Apps"
+version = "1.0.0"
+id = "artifacts/omi"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 26126
+
+[services.development]
+run = "pnpm --filter @workspace/omi run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/omi", "run", "build" ]
+publicDir = "artifacts/omi/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "26126"
+BASE_PATH = "/"

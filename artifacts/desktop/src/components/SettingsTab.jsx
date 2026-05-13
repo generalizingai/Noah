@@ -8,7 +8,16 @@ import {
   getVoiceModel, saveVoiceModel, getSystemInstructions, saveSystemInstructions,
   getIntegrations, saveAllIntegrations, getIntegrationToken,
 } from '../services/keys';
-import { getHermesBrainMode, setHermesBrainMode, getHermesBackendStatus, getHermesModel, setHermesModel, getRequireToolApproval, setRequireToolApproval } from '../services/noahApi';
+import { getHermesBrainMode, setHermesBrainMode, getHermesBackendStatus, getHermesModel, setHermesModel, getRequireToolApproval, setRequireToolApproval, getExecutionMode, setExecutionMode } from '../services/noahApi';
+import {
+  getCapabilitySnapshot,
+  getOrchestrationMetrics,
+  getOrchestrationTrace,
+  getExecutionProfile,
+  setExecutionProfile,
+  getRiskLevel,
+  setRiskLevel,
+} from '../services/noahApi';
 import {
   Setting06Icon, Mic01Icon, GearsIcon, ShieldKeyIcon,
   CheckmarkCircle01Icon, Cancel01Icon, EyeIcon, KeyboardIcon,
@@ -772,7 +781,7 @@ function ToolApprovalToggleRow() {
   return (
     <Row
       label="Confirm before running commands"
-      sub="Show an approval dialog before Hermes runs shell commands, writes files, or executes AppleScript"
+      sub="Show an approval dialog before Combat runs shell commands, writes files, or executes AppleScript"
       right={
         <button
           onClick={toggle}
@@ -809,10 +818,250 @@ function ToolApprovalToggleRow() {
   );
 }
 
+function ExecutionModeRow() {
+  const [mode, setMode] = useState(getExecutionMode());
+  const [saved, setSaved] = useState(false);
+
+  const apply = (next) => {
+    setMode(next);
+    setExecutionMode(next);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1800);
+  };
+
+  return (
+    <Row label="Execution Mode" sub="How Noah prioritizes tool usage for task execution">
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => apply('general')}
+            className="px-3 py-2 rounded-lg text-[11px] transition-all"
+            style={{
+              background: mode === 'general' ? 'rgba(74,222,128,0.16)' : 'rgba(255,255,255,0.05)',
+              border: mode === 'general' ? '1px solid rgba(74,222,128,0.4)' : '1px solid rgba(255,255,255,0.08)',
+              color: mode === 'general' ? '#86efac' : 'rgba(255,255,255,0.75)',
+            }}
+          >
+            General
+          </button>
+          <button
+            onClick={() => apply('coder_terminal_first')}
+            className="px-3 py-2 rounded-lg text-[11px] transition-all"
+            style={{
+              background: mode === 'coder_terminal_first' ? 'rgba(99,102,241,0.18)' : 'rgba(255,255,255,0.05)',
+              border: mode === 'coder_terminal_first' ? '1px solid rgba(99,102,241,0.4)' : '1px solid rgba(255,255,255,0.08)',
+              color: mode === 'coder_terminal_first' ? '#a5b4fc' : 'rgba(255,255,255,0.75)',
+            }}
+          >
+            Coder (Terminal-first)
+          </button>
+        </div>
+        <p className="text-[10px] text-white/42 leading-relaxed">
+          {mode === 'coder_terminal_first'
+            ? 'Noah prioritizes shell and file-based coding workflows; GUI automation is fallback.'
+            : 'Balanced behavior for general assistant tasks and app automation.'}
+        </p>
+        {saved && <p className="text-[10px] text-green-400/70">Saved.</p>}
+      </div>
+    </Row>
+  );
+}
+
+function OrchestrationPolicyRow() {
+  const [profile, setProfile] = useState(getExecutionProfile);
+  const [risk, setRisk] = useState(getRiskLevel);
+  const [saved, setSaved] = useState(false);
+
+  const applyProfile = (v) => {
+    setProfile(v);
+    setExecutionProfile(v);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1600);
+  };
+  const applyRisk = (v) => {
+    setRisk(v);
+    setRiskLevel(v);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1600);
+  };
+
+  return (
+    <Row label="Hybrid Autonomy Policy" sub="How Noah routes tasks between server, device, and cloud planes">
+      <div className="space-y-2">
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            ['hybrid_auto', 'Hybrid Auto'],
+            ['prefer_local', 'Prefer Local'],
+            ['prefer_server', 'Prefer Server'],
+          ].map(([id, label]) => (
+            <button
+              key={id}
+              onClick={() => applyProfile(id)}
+              className="px-2.5 py-2 rounded-lg text-[10px] transition-all"
+              style={{
+                background: profile === id ? 'rgba(74,222,128,0.16)' : 'rgba(255,255,255,0.05)',
+                border: profile === id ? '1px solid rgba(74,222,128,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                color: profile === id ? '#86efac' : 'rgba(255,255,255,0.75)',
+              }}
+            >{label}</button>
+          ))}
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            ['risk_based', 'Risk-based'],
+            ['always_ask', 'Always Ask'],
+            ['power_mode', 'Power Mode'],
+          ].map(([id, label]) => (
+            <button
+              key={id}
+              onClick={() => applyRisk(id)}
+              className="px-2.5 py-2 rounded-lg text-[10px] transition-all"
+              style={{
+                background: risk === id ? 'rgba(99,102,241,0.18)' : 'rgba(255,255,255,0.05)',
+                border: risk === id ? '1px solid rgba(99,102,241,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                color: risk === id ? '#a5b4fc' : 'rgba(255,255,255,0.75)',
+              }}
+            >{label}</button>
+          ))}
+        </div>
+        {saved && <p className="text-[10px] text-green-400/70">Saved.</p>}
+      </div>
+    </Row>
+  );
+}
+
+function AutonomyDiagnosticsRow({ user }) {
+  const [caps, setCaps] = useState(null);
+  const [metrics, setMetrics] = useState(getOrchestrationMetrics);
+  const [trace, setTrace] = useState(getOrchestrationTrace);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const token = await user?.getIdToken?.();
+      const c = await getCapabilitySnapshot(token);
+      setCaps(c);
+      setMetrics(getOrchestrationMetrics());
+      setTrace(getOrchestrationTrace().slice(-8).reverse());
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const bridgeState = caps?.desktop_bridge?.state || (caps?.desktop_bridge?.available ? 'connected' : 'offline');
+  const bridgeStreams = Number(caps?.desktop_bridge?.streams || 0);
+  const bridgeLabel =
+    bridgeState === 'connected'
+      ? `connected (${bridgeStreams} stream${bridgeStreams === 1 ? '' : 's'})`
+      : bridgeState === 'idle'
+        ? 'idle (no active stream yet)'
+        : 'offline';
+
+  const playwrightLabel = caps?.local_playwright?.available
+    ? `ready${caps?.local_playwright?.version ? ` (v${caps.local_playwright.version})` : ''}`
+    : `missing (${caps?.local_playwright?.reason || 'unknown'})`;
+
+  const readinessChecks = [
+    {
+      name: 'Desktop Bridge',
+      ok: bridgeState === 'connected',
+      detail: bridgeLabel,
+      hint: 'Open Noah desktop app and send one chat to establish live stream.',
+    },
+    {
+      name: 'Local VS Code',
+      ok: !!caps?.local_vscode?.available,
+      detail: caps?.local_vscode?.available ? 'available' : (caps?.local_vscode?.reason || 'unavailable'),
+      hint: 'Install VS Code and make `code` command available in PATH.',
+    },
+    {
+      name: 'Playwright',
+      ok: !!caps?.local_playwright?.available,
+      detail: playwrightLabel,
+      hint: 'Install Playwright in desktop runtime.',
+    },
+    {
+      name: 'Codespaces Auth',
+      ok: !!caps?.github_codespaces_auth?.available,
+      detail: caps?.github_codespaces_auth?.available ? 'ready' : 'missing GitHub token',
+      hint: 'Connect GitHub token in Connectors.',
+    },
+    {
+      name: 'Skills Module',
+      ok: !!caps?.skills?.available,
+      detail: caps?.skills?.available ? `${caps.skills.count || 0} installed` : 'unavailable',
+      hint: 'Install at least one skill in Skills tab.',
+    },
+    {
+      name: 'Workers Runtime',
+      ok: !!caps?.delegation?.worker_available,
+      detail: caps?.delegation?.worker_available ? 'enabled' : 'disabled by backend flag',
+      hint: 'Set NOAH_WORKER_AGENTS_ENABLED=true on backend.',
+    },
+    {
+      name: 'Hermes Parity',
+      ok: Number(caps?.parity?.missing_count || 0) === 0,
+      detail: `${Number(caps?.parity?.parity_percent || 0).toFixed(2)}% (${caps?.parity?.missing_count || 0} missing)`,
+      hint: 'Open /api/v1/hermes/parity for exact missing tool names.',
+    },
+  ];
+  const readinessScore = readinessChecks.filter(c => c.ok).length;
+
+  return (
+    <Row label="Autonomy Diagnostics" sub="Runtime capability health and orchestration telemetry">
+      <div className="space-y-2">
+        <button onClick={refresh} className="btn-ghost px-3 py-1.5 text-[10px]">
+          {loading ? 'Refreshing...' : 'Refresh diagnostics'}
+        </button>
+        <div className="text-[10px] text-white/55 space-y-1">
+          <p>Desktop bridge: {bridgeLabel}</p>
+          <p>Local VS Code: {caps?.local_vscode?.available ? 'available' : `unavailable (${caps?.local_vscode?.reason || 'unknown'})`}</p>
+          <p>Playwright: {playwrightLabel}</p>
+          <p>Codespaces auth: {caps?.github_codespaces_auth?.available ? 'ready' : 'missing GitHub token'}</p>
+          <p>Skills: {caps?.skills?.available ? `${caps.skills.count || 0} installed` : 'unavailable'}</p>
+          <p>Delegation: virtual {caps?.delegation?.virtual_available ? 'on' : 'off'}, workers {caps?.delegation?.worker_available ? 'on' : 'off'}</p>
+          <p>Parity: {Number(caps?.parity?.parity_percent || 0).toFixed(2)}% ({caps?.parity?.missing_count || 0} missing)</p>
+        </div>
+        <div className="rounded-lg px-2.5 py-2" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <p className="text-[10px] text-white/70 mb-1">Combat Readiness: {readinessScore}/{readinessChecks.length}</p>
+          <div className="space-y-1.5">
+            {readinessChecks.map((c) => (
+              <div key={c.name} className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className={`text-[10px] ${c.ok ? 'text-green-300/90' : 'text-red-300/90'}`}>{c.name}</p>
+                  <p className="text-[10px] text-white/45 truncate">{c.detail}</p>
+                </div>
+                {!c.ok && <span className="text-[10px] text-amber-300/80">{c.hint}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+        <p className="text-[10px] text-white/35">
+          Metrics: success(stream/json/fast-retry)=
+          {metrics.query_success_stream || 0}/{metrics.query_success_json_fallback || 0}/{metrics.query_success_fast_retry || 0},
+          failures={metrics.query_failure || 0}
+        </p>
+        <div className="max-h-28 overflow-y-auto rounded-lg px-2 py-1.5" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          {trace.length === 0 ? (
+            <p className="text-[10px] text-white/30">No trace yet.</p>
+          ) : trace.map((t, idx) => (
+            <p key={`${t.at}-${idx}`} className="text-[10px] text-white/50 font-mono truncate">
+              {t.at?.slice(11, 19)} {t.event} {t.tool ? `(${t.tool})` : ''}
+            </p>
+          ))}
+        </div>
+      </div>
+    </Row>
+  );
+}
+
 // ─── AI Brain mode picker ──────────────────────────────────────────────────────
 
 function BrainModeRow() {
-  const [mode,         setMode]         = useState(getHermesBrainMode);
+  const [mode,         setMode]         = useState('classic');
   const [status,       setStatus]       = useState(null);
   const [statusInfo,   setStatusInfo]   = useState(null);
   const [checking,     setChecking]     = useState(false);
@@ -836,6 +1085,7 @@ function BrainModeRow() {
   };
 
   useEffect(() => {
+    getHermesBrainMode().then(setMode).catch(() => setMode('classic'));
     check(); // Initial check
 
     // Set up periodic status checking every 30 seconds
@@ -935,7 +1185,7 @@ function BrainModeRow() {
   return (
     <Row
       label="AI Brain"
-      sub="Classic uses your OpenAI key directly. Hermes routes through Noah's backend engine with server-side tools."
+      sub="Classic uses your OpenAI key directly. Combat routes through Noah's backend engine with server-side tools."
     >
       <div className="flex flex-col gap-3">
         {/* Pill toggle — inset shadow only (no external box-shadow) */}
@@ -943,7 +1193,7 @@ function BrainModeRow() {
           style={{ background: 'rgba(255,255,255,0.05)', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.3)' }}>
           {[
             { id: 'classic', label: 'Classic', sub: 'GPT-4o direct' },
-            { id: 'hermes',  label: 'Hermes',  sub: 'Backend engine' },
+            { id: 'hermes',  label: 'Combat',  sub: 'Backend engine' },
           ].map(({ id, label, sub: sub2 }) => {
             const active = mode === id;
             return (
@@ -976,7 +1226,7 @@ function BrainModeRow() {
         {mode === 'hermes' && (
           <div className="flex flex-col gap-2">
             <p className="text-[10px] text-white/35 leading-relaxed">
-              Hermes mode: queries route to Noah's backend AI engine.
+              Combat mode: queries route to Noah's backend AI engine.
               Uses parallel tool execution, persistent session memory, and context compression.
               No OpenAI key required — runs on Noah's servers.
             </p>
@@ -1105,12 +1355,12 @@ function BrainModeRow() {
             {statusInfo?.reachable && (
               <p className="text-[10px] text-white/45 leading-relaxed">
                 Selected model: <span className="font-mono">{model}</span>
-                {statusInfo?.model ? <> · Backend default: <span className="font-mono">{statusInfo.model}</span></> : null}
+                {statusInfo?.model ? <> · Server default (unused when selected model is set): <span className="font-mono">{statusInfo.model}</span></> : null}
               </p>
             )}
             {statusInfo?.reachable && !statusInfo?.active && (
               <p className="text-[10px] text-amber-300/75 leading-relaxed">
-                Backend is reachable at <span className="font-mono">{statusInfo.base}</span> but Hermes mode is disabled on server.
+                Backend is reachable at <span className="font-mono">{statusInfo.base}</span> but Combat mode is disabled on server.
                 Set <span className="font-mono">NOAH_BRAIN_MODE=hermes</span> in Railway.
               </p>
             )}
@@ -1124,7 +1374,7 @@ function BrainModeRow() {
 
         {saved && (
           <p className="text-[11px] text-green-400/70">
-            {mode === 'hermes' ? 'Hermes mode enabled. Next query routes to backend.' : 'Classic mode restored.'}
+            {mode === 'hermes' ? 'Combat mode enabled. Next query routes to backend.' : 'Classic mode restored.'}
           </p>
         )}
       </div>
@@ -1189,7 +1439,7 @@ export default function SettingsTab() {
         {/* API Keys */}
         <Section icon={<ShieldKeyIcon size={12} strokeWidth={1.8} />} title="API Keys"
           description="Your keys are stored locally and sent securely to Noah's backend on every request. They are never stored on the server.">
-          <ApiKeyInput label="OpenRouter API Key" sub="Required for Hermes AI mode — get yours at openrouter.ai"
+          <ApiKeyInput label="OpenRouter API Key" sub="Required for Combat AI mode — get yours at openrouter.ai"
             value={openrouterKey} onChange={setOpenrouterKey} onSave={handleSaveOpenRouter} placeholder="sk-or-v1-..." saved={openrouterSaved} />
           <ApiKeyInput label="OpenAI API Key" sub="Used for Classic mode, Whisper STT, and screen vision"
             value={openaiKey} onChange={setOpenaiKey} onSave={handleSaveOpenAI} placeholder="sk-..." saved={openaiSaved} />
@@ -1210,7 +1460,10 @@ export default function SettingsTab() {
         <Section icon={<Brain01Icon size={12} strokeWidth={1.8} />} title="AI Brain"
           description="Choose which AI engine powers Noah's responses">
           <BrainModeRow />
+          <ExecutionModeRow />
+          <OrchestrationPolicyRow />
           <ToolApprovalToggleRow />
+          <AutonomyDiagnosticsRow user={user} />
         </Section>
 
         {/* Integrations */}
@@ -1274,7 +1527,7 @@ export default function SettingsTab() {
           {[
             ['Version',   '1.0.0'],
             ['Platform',  isElectron ? 'Desktop (Electron)' : 'Web Preview'],
-            ['AI Brain',  getHermesBrainMode() === 'hermes' ? 'Hermes (Backend)' : 'Classic (GPT-4o)'],
+            ['AI Brain',  getHermesBrainMode() === 'hermes' ? 'Combat (Backend)' : 'Classic (GPT-4o)'],
             ['STT',       'OpenAI Whisper'],
             ['TTS',       'Deepgram Aura'],
           ].map(([k, v]) => (

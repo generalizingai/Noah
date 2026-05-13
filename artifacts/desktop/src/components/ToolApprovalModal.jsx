@@ -91,7 +91,7 @@ export default function ToolApprovalModal({ request, onApprove, onCancel }) {
               Allow {meta.label}?
             </p>
             <p style={{ fontSize: 10, color: 'rgba(228,240,232,0.38)', margin: '2px 0 0' }}>
-              Hermes wants to run an operation on your Mac
+              Combat wants to run an operation on your Mac
             </p>
           </div>
         </div>

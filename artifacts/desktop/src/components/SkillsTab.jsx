@@ -96,8 +96,22 @@ function SkillCard({ skill, onDelete, onView }) {
 
 function InstallModal({ onClose, onInstalled, getToken }) {
   const [content, setContent] = useState('');
+  const [fileName, setFileName] = useState('');
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState('');
+
+  const handleFilePick = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try {
+      const txt = await f.text();
+      setContent(txt);
+      setFileName(f.name || '');
+      setError('');
+    } catch {
+      setError('Could not read selected file.');
+    }
+  };
 
   const handleInstall = async () => {
     if (!content.trim()) return;
@@ -125,12 +139,25 @@ function InstallModal({ onClose, onInstalled, getToken }) {
           style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
           <div>
             <h3 className="text-sm font-semibold text-white/85">Install Skill</h3>
-            <p className="text-[10px] text-white/30 mt-0.5">Paste a .md skill file below</p>
+            <p className="text-[10px] text-white/30 mt-0.5">Upload a skill file or paste content</p>
           </div>
           <button className="btn-icon" onClick={onClose}><ArrowLeft01Icon size={13} strokeWidth={1.8} /></button>
         </div>
 
         <div className="flex-1 overflow-auto px-5 py-4">
+          <div className="mb-3">
+            <label className="inline-flex items-center gap-2 text-[10px] px-3 py-2 rounded-lg cursor-pointer"
+              style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.75)' }}>
+              <Download02Icon size={11} strokeWidth={1.8} />
+              <span>{fileName ? `Loaded: ${fileName}` : 'Choose .md or .txt file'}</span>
+              <input
+                type="file"
+                accept=".md,.markdown,.txt,text/markdown,text/plain"
+                className="hidden"
+                onChange={handleFilePick}
+              />
+            </label>
+          </div>
           <textarea
             value={content}
             onChange={e => setContent(e.target.value)}

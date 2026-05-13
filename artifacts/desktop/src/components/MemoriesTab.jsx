@@ -1,34 +1,66 @@
 import React, { useState, useEffect } from 'react';
-import { getAllMemories, deleteMemory, clearAllMemories, addMemory } from '../services/memory';
+import { useAuth } from '../services/auth';
+import { getBackendMemories, createBackendMemory, deleteBackendMemory } from '../services/noahApi';
 import { Brain01Icon, Search01Icon, Archive01Icon, Delete02Icon, Add01Icon } from 'hugeicons-react';
 
 export default function MemoriesTab() {
+  const { user } = useAuth();
   const [memories, setMemories] = useState([]);
   const [search,   setSearch]   = useState('');
   const [newText,  setNewText]  = useState('');
   const [adding,   setAdding]   = useState(false);
+  const [error,    setError]    = useState('');
+  const [loading,  setLoading]  = useState(false);
 
-  const reload = () => setMemories(getAllMemories());
+  const reload = async () => {
+    if (!user?.getIdToken) return;
+    setLoading(true);
+    setError('');
+    try {
+      const token = await user.getIdToken();
+      const rows = await getBackendMemories(token, { limit: 5000, offset: 0 });
+      setMemories(Array.isArray(rows) ? rows : []);
+    } catch (err) {
+      setError(err.message || 'Failed to load memories.');
+      setMemories([]);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     reload();
-    // Poll every 2 s so newly saved memories (via save_memory tool) appear automatically
-    const interval = setInterval(reload, 2000);
+    // Poll every 3s so newly saved backend memories appear automatically.
+    const interval = setInterval(reload, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [user]);
 
-  const handleDelete = (id) => { deleteMemory(id); reload(); };
-  const handleClear  = () => { if (confirm('Clear all memories? Noah will forget everything it knows about you.')) { clearAllMemories(); reload(); } };
-  const handleAdd    = () => {
+  const handleDelete = async (id) => {
+    if (!user?.getIdToken) return;
+    try {
+      const token = await user.getIdToken();
+      await deleteBackendMemory(id, token);
+      await reload();
+    } catch (err) {
+      setError(err.message || 'Failed to delete memory.');
+    }
+  };
+  const handleAdd    = async () => {
     if (!newText.trim()) return;
-    addMemory(newText.trim());
-    setNewText('');
-    setAdding(false);
-    reload();
+    if (!user?.getIdToken) return;
+    try {
+      const token = await user.getIdToken();
+      await createBackendMemory(newText.trim(), token);
+      setNewText('');
+      setAdding(false);
+      await reload();
+    } catch (err) {
+      setError(err.message || 'Failed to save memory.');
+    }
   };
 
   const filtered = memories.filter(m =>
-    !search || m.text.toLowerCase().includes(search.toLowerCase())
+    !search || String(m.content || '').toLowerCase().includes(search.toLowerCase())
   );
 
   const fmt = (ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
@@ -47,12 +79,9 @@ export default function MemoriesTab() {
             className="btn-icon" title="Add memory manually">
             <Add01Icon size={13} strokeWidth={1.8} />
           </button>
-          {memories.length > 0 && (
-            <button onClick={handleClear} className="btn-icon"
-              style={{ borderColor: 'rgba(239,68,68,0.2)', color: 'rgba(248,113,113,0.7)' }} title="Clear all memories">
-              <Delete02Icon size={13} strokeWidth={1.8} />
-            </button>
-          )}
+          <button onClick={reload} className="btn-icon" title="Refresh memories">
+            <Archive01Icon size={13} strokeWidth={1.8} />
+          </button>
         </div>
       </div>
 
@@ -103,6 +132,12 @@ export default function MemoriesTab() {
 
       {/* List */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+        {loading && (
+          <p className="text-xs text-white/35 py-2">Loading memories...</p>
+        )}
+        {error && (
+          <p className="text-xs text-red-400 py-2">{error}</p>
+        )}
         {!search && filtered.length === 0 && (
           <div className="text-center py-14">
             <div className="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center"
@@ -119,7 +154,7 @@ export default function MemoriesTab() {
         {filtered.map((m) => (
           <div key={m.id} className="glass-card p-3.5 flex items-start gap-3 group">
             <div className="flex-1 min-w-0">
-              <p className="text-xs leading-relaxed text-white/70">{m.text}</p>
+              <p className="text-xs leading-relaxed text-white/70">{m.content}</p>
               <p className="text-[10px] mt-1.5 text-white/25">{fmt(m.created_at)}</p>
             </div>
             <button

@@ -76,7 +76,16 @@ export function saveSystemInstructions(text) {
 }
 
 export function getOpenRouterKey() {
-  try { const k = localStorage.getItem(LS_OPENROUTER)?.trim(); if (k) return k; } catch {}
+  try {
+    const k = localStorage.getItem(LS_OPENROUTER)?.trim();
+    if (k) return k;
+  } catch {}
+  // Backward-compatible fallback: some builds store OpenRouter in integrations.
+  try {
+    const integrations = getIntegrations();
+    const alt = (integrations.openrouter_key || integrations.openrouter_api_key || '').trim();
+    if (alt) return alt;
+  } catch {}
   return _openrouter || import.meta.env.VITE_OPENROUTER_API_KEY || '';
 }
 

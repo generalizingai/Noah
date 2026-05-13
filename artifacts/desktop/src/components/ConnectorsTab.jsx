@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { getIntegrations, saveAllIntegrations } from '../services/keys';
+import { auth } from '../services/auth';
 import { CheckmarkCircle01Icon, Cancel01Icon, Link01Icon, EyeIcon } from 'hugeicons-react';
 
 // ─── Logo helpers ──────────────────────────────────────────────────────────────
@@ -64,6 +65,7 @@ const NATIVE_APPS = [
   { id: 'excel',        name: 'Excel',         logo: i8('microsoft-excel-2019'),    fallback: '#217346', desc: 'Read and edit spreadsheets',            category: 'Productivity' },
   { id: 'powerpoint',   name: 'PowerPoint',    logo: i8('microsoft-powerpoint-2019'), fallback: '#D24726', desc: 'Create and open presentations',      category: 'Productivity' },
   // Dev
+  { id: 'vscode',       name: 'VS Code',       logo: i8('visual-studio-code-2019'), fallback: '#007ACC', desc: 'Open projects/files and run coding tasks', category: 'Development' },
   { id: 'xcode',        name: 'Xcode',         logo: i8color('xcode'),              fallback: '#1575F9', desc: 'Open projects, build, run apps',        category: 'Development' },
   { id: 'terminal',     name: 'Terminal',      logo: i8glass('console'),            fallback: '#333333', desc: 'Run shell commands and scripts',        category: 'Development' },
   // System
@@ -71,6 +73,30 @@ const NATIVE_APPS = [
 ];
 
 const API_CONNECTORS = [
+  {
+    key: 'higgsfield_cli',
+    name: 'Higgsfield CLI',
+    logo: 'https://higgsfield.ai/favicon.ico',
+    fallback: '#111827',
+    fallbackLabel: 'H',
+    category: 'AI & Voice',
+    desc: 'One-click CLI setup for Higgsfield image/video generation in Noah automations.',
+    placeholder: 'Auto-managed by setup flow (stores status marker)',
+    link: 'https://higgsfield.ai/cli',
+    linkLabel: 'CLI docs →',
+  },
+  {
+    key: 'heygen_cli',
+    name: 'HeyGen CLI',
+    logo: 'https://developers.heygen.com/favicon.ico',
+    fallback: '#0f172a',
+    fallbackLabel: 'Y',
+    category: 'AI & Voice',
+    desc: 'One-click CLI setup for HeyGen video generation in Noah automations.',
+    placeholder: 'Auto-managed by setup flow (stores status marker)',
+    link: 'https://developers.heygen.com/cli',
+    linkLabel: 'CLI docs →',
+  },
   {
     key: 'elevenlabs_key',
     name: 'ElevenLabs',
@@ -279,6 +305,188 @@ function ApiTile({ connector, connected, onClick }) {
 
 function ApiExpandedForm({ connector, value, extraValue, onChange, onExtraChange, onClose }) {
   const [showKey, setShowKey] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [oauthMsg, setOauthMsg] = useState('');
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupMsg, setSetupMsg] = useState('');
+
+  const runConnectorShell = async (command, timeoutMs = 12 * 60 * 1000) => {
+    if (typeof window === 'undefined' || !window.electronAPI?.runShellLong) {
+      throw new Error('Desktop shell bridge is unavailable.');
+    }
+    const result = await window.electronAPI.runShellLong({ command, timeoutMs });
+    if (!result?.success) {
+      throw new Error(result?.output || result?.error || 'Command failed.');
+    }
+    return result;
+  };
+
+  const runInteractiveInTerminal = async (command) => {
+    if (typeof window === 'undefined' || !window.electronAPI?.runApplescript) {
+      throw new Error('Desktop automation bridge is unavailable.');
+    }
+    const escaped = String(command).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const script = `tell application "Terminal"
+activate
+do script "${escaped}"
+end tell`;
+    const result = await window.electronAPI.runApplescript(script);
+    if (!result?.success) {
+      throw new Error(result?.output || result?.error || 'Failed to open Terminal for auth.');
+    }
+    return result;
+  };
+
+  const handleGitHubConnect = async () => {
+    if (oauthBusy) return;
+    setOauthBusy(true);
+    setOauthMsg('');
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('Please sign in first.');
+      const idToken = await user.getIdToken();
+
+      const backendBase = (typeof window !== 'undefined' && window.electronAPI?.getBackendUrl)
+        ? (await window.electronAPI.getBackendUrl()) || 'https://noah-production-0ef2.up.railway.app'
+        : 'https://noah-production-0ef2.up.railway.app';
+
+      const startResp = await fetch(`${backendBase}/api/v1/integrations/github/oauth/start`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+      });
+      const startData = await startResp.json().catch(() => ({}));
+      if (!startResp.ok || !startData.auth_url || !startData.state) {
+        throw new Error(startData.detail || 'Failed to start GitHub OAuth.');
+      }
+
+      if (typeof window !== 'undefined' && window.electronAPI?.openExternal) {
+        window.electronAPI.openExternal(startData.auth_url);
+      } else {
+        window.open(startData.auth_url, '_blank', 'noopener,noreferrer');
+      }
+      setOauthMsg('Waiting for GitHub authorization...');
+
+      const started = Date.now();
+      let connectedToken = '';
+      while (Date.now() - started < 180000) {
+        await new Promise(r => setTimeout(r, 1800));
+        const pollResp = await fetch(`${backendBase}/api/v1/integrations/github/oauth/result?state=${encodeURIComponent(startData.state)}`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
+        });
+        const pollData = await pollResp.json().catch(() => ({}));
+        if (pollResp.ok && pollData.status === 'ok' && pollData.access_token) {
+          connectedToken = pollData.access_token;
+          break;
+        }
+        if (pollResp.ok && pollData.status === 'pending') continue;
+        if (pollResp.status === 404 || pollResp.status === 410) break;
+        if (!pollResp.ok) throw new Error(pollData.detail || 'OAuth polling failed.');
+      }
+
+      if (!connectedToken) {
+        throw new Error('Timed out waiting for GitHub authorization. Please try again.');
+      }
+      onChange(connectedToken);
+      setOauthMsg('GitHub connected. Click "Save all" to persist.');
+    } catch (e) {
+      setOauthMsg(e.message || 'GitHub connect failed.');
+    } finally {
+      setOauthBusy(false);
+    }
+  };
+
+  const handleHiggsfieldInstall = async () => {
+    if (setupBusy) return;
+    setSetupBusy(true);
+    setSetupMsg('');
+    try {
+      const installCommand = [
+        'set -e',
+        'if command -v higgsfield >/dev/null 2>&1; then',
+        '  echo "Higgsfield CLI already installed"',
+        'else',
+        '  npm install -g @higgsfield/cli',
+        'fi',
+        'higgsfield --version || higgsfield version',
+      ].join('\n');
+      const out = await runConnectorShell(installCommand, 15 * 60 * 1000);
+      const versionLine = (out.output || '').split('\n').find(Boolean) || 'installed';
+      onChange(`installed:${versionLine}`);
+      setSetupMsg('Higgsfield CLI installed. Next: run Sign in.');
+    } catch (e) {
+      setSetupMsg(e.message || 'Install failed.');
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+
+  const handleHiggsfieldAuth = async () => {
+    if (setupBusy) return;
+    setSetupBusy(true);
+    setSetupMsg('');
+    try {
+      await runInteractiveInTerminal('higgsfield auth login');
+      setSetupMsg('Terminal opened. Complete login there, then click Verify here.');
+    } catch (e) {
+      setSetupMsg(e.message || 'Sign-in failed.');
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+
+  const handleHiggsfieldVerify = async () => {
+    if (setupBusy) return;
+    setSetupBusy(true);
+    setSetupMsg('');
+    try {
+      const verifyCommand = [
+        'set -e',
+        'if higgsfield auth whoami >/dev/null 2>&1; then',
+        '  higgsfield auth whoami',
+        'elif higgsfield auth status >/dev/null 2>&1; then',
+        '  higgsfield auth status',
+        'else',
+        '  echo "Authenticated command check unavailable on this CLI version."',
+        'fi',
+      ].join('\n');
+      const out = await runConnectorShell(verifyCommand, 60 * 1000);
+      onChange('connected');
+      setSetupMsg(`Verified: ${(out.output || 'connected').split('\n')[0]}`);
+    } catch (e) {
+      setSetupMsg(e.message || 'Verification failed.');
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+
+  const handleHiggsfieldOneClick = async () => {
+    if (setupBusy) return;
+    setSetupBusy(true);
+    setSetupMsg('');
+    try {
+      const installCommand = [
+        'set -e',
+        'if command -v higgsfield >/dev/null 2>&1; then',
+        '  echo "Higgsfield CLI already installed"',
+        'else',
+        '  npm install -g @higgsfield/cli',
+        'fi',
+        'higgsfield --version || higgsfield version',
+      ].join('\n');
+      await runConnectorShell(installCommand, 15 * 60 * 1000);
+      await runInteractiveInTerminal('higgsfield auth login');
+      setSetupMsg('CLI installed. Terminal opened for login. Complete login there, then click Verify.');
+    } catch (e) {
+      setSetupMsg(e.message || 'One-click setup failed.');
+    } finally {
+      setSetupBusy(false);
+    }
+  };
 
   return (
     <div
@@ -299,23 +507,143 @@ function ApiExpandedForm({ connector, value, extraValue, onChange, onExtraChange
       <p className="text-[11px] text-white/35 mb-3">{connector.desc}</p>
 
       <div className="flex flex-col gap-2">
-        <div className="relative">
-          <input
-            type={showKey ? 'text' : 'password'}
-            value={value}
-            onChange={e => onChange(e.target.value)}
-            placeholder={connector.placeholder}
-            className="noah-input w-full px-3 py-2 text-xs font-mono pr-9"
-            spellCheck={false}
-            autoFocus
-          />
-          <button
-            onClick={() => setShowKey(v => !v)}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/25 hover:text-white/55 transition-colors"
-          >
-            <EyeIcon size={12} strokeWidth={1.8} />
-          </button>
-        </div>
+        {connector.key !== 'higgsfield_cli' && (
+          <div className="relative">
+            <input
+              type={showKey ? 'text' : 'password'}
+              value={value}
+              onChange={e => onChange(e.target.value)}
+              placeholder={connector.placeholder}
+              className="noah-input w-full px-3 py-2 text-xs font-mono pr-9"
+              spellCheck={false}
+              autoFocus
+            />
+            <button
+              onClick={() => setShowKey(v => !v)}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/25 hover:text-white/55 transition-colors"
+            >
+              <EyeIcon size={12} strokeWidth={1.8} />
+            </button>
+          </div>
+        )}
+
+        {(connector.key === 'higgsfield_cli' || connector.key === 'heygen_cli') && (
+          <div className="rounded-lg p-3" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+            <p className="text-[11px] text-white/45 mb-2">
+              One-click setup runs:
+              <br />
+              {connector.key === 'higgsfield_cli' ? (
+                <span className="font-mono">npm install -g @higgsfield/cli</span>
+              ) : (
+                <span className="font-mono">curl -fsSL https://static.heygen.ai/cli/install.sh | bash</span>
+              )}
+              <br />
+              <span className="font-mono">{connector.key === 'higgsfield_cli' ? 'higgsfield auth login' : 'heygen auth login'}</span>
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={connector.key === 'higgsfield_cli' ? handleHiggsfieldOneClick : async () => {
+                  if (setupBusy) return;
+                  setSetupBusy(true);
+                  setSetupMsg('');
+                  try {
+                    const installCommand = [
+                      'set -e',
+                      'if command -v heygen >/dev/null 2>&1; then',
+                      '  echo "HeyGen CLI already installed"',
+                      'else',
+                      '  curl -fsSL https://static.heygen.ai/cli/install.sh | bash',
+                      'fi',
+                      'heygen --version',
+                    ].join('\n');
+                    await runConnectorShell(installCommand, 15 * 60 * 1000);
+                    await runInteractiveInTerminal('heygen auth login');
+                    setSetupMsg('CLI installed. Terminal opened for login. Complete login there, then click Verify.');
+                  } catch (e) {
+                    setSetupMsg(e.message || 'One-click setup failed.');
+                  } finally {
+                    setSetupBusy(false);
+                  }
+                }}
+                disabled={setupBusy}
+                className="btn-green text-[11px] px-3 py-1.5 disabled:opacity-50"
+              >
+                {setupBusy ? 'Running setup...' : 'One-click setup'}
+              </button>
+              <button
+                onClick={connector.key === 'higgsfield_cli' ? handleHiggsfieldInstall : async () => {
+                  if (setupBusy) return;
+                  setSetupBusy(true);
+                  setSetupMsg('');
+                  try {
+                    const installCommand = [
+                      'set -e',
+                      'if command -v heygen >/dev/null 2>&1; then',
+                      '  echo "HeyGen CLI already installed"',
+                      'else',
+                      '  curl -fsSL https://static.heygen.ai/cli/install.sh | bash',
+                      'fi',
+                      'heygen --version',
+                    ].join('\n');
+                    const out = await runConnectorShell(installCommand, 15 * 60 * 1000);
+                    const versionLine = (out.output || '').split('\n').find(Boolean) || 'installed';
+                    onChange(`installed:${versionLine}`);
+                    setSetupMsg('HeyGen CLI installed. Next: run Sign in.');
+                  } catch (e) {
+                    setSetupMsg(e.message || 'Install failed.');
+                  } finally {
+                    setSetupBusy(false);
+                  }
+                }}
+                disabled={setupBusy}
+                className="text-[11px] px-3 py-1.5 rounded-md border border-white/15 text-white/70 hover:bg-white/5 disabled:opacity-50"
+              >
+                Install CLI
+              </button>
+              <button
+                onClick={connector.key === 'higgsfield_cli' ? handleHiggsfieldAuth : async () => {
+                  if (setupBusy) return;
+                  setSetupBusy(true);
+                  setSetupMsg('');
+                  try {
+                    await runInteractiveInTerminal('heygen auth login');
+                    setSetupMsg('Terminal opened. Complete login there, then click Verify here.');
+                  } catch (e) {
+                    setSetupMsg(e.message || 'Sign-in failed.');
+                  } finally {
+                    setSetupBusy(false);
+                  }
+                }}
+                disabled={setupBusy}
+                className="text-[11px] px-3 py-1.5 rounded-md border border-white/15 text-white/70 hover:bg-white/5 disabled:opacity-50"
+              >
+                Sign in
+              </button>
+              <button
+                onClick={connector.key === 'higgsfield_cli' ? handleHiggsfieldVerify : async () => {
+                  if (setupBusy) return;
+                  setSetupBusy(true);
+                  setSetupMsg('');
+                  try {
+                    const out = await runConnectorShell('heygen auth status', 60 * 1000);
+                    onChange('connected');
+                    setSetupMsg(`Verified: ${(out.output || 'connected').split('\n')[0]}`);
+                  } catch (e) {
+                    setSetupMsg(e.message || 'Verification failed.');
+                  } finally {
+                    setSetupBusy(false);
+                  }
+                }}
+                disabled={setupBusy}
+                className="text-[11px] px-3 py-1.5 rounded-md border border-white/15 text-white/70 hover:bg-white/5 disabled:opacity-50"
+              >
+                Verify
+              </button>
+            </div>
+            {setupMsg ? <p className="text-[10px] text-white/45 mt-2">{setupMsg}</p> : null}
+            {value ? <p className="text-[10px] text-green-400/70 mt-1">Status: {value}</p> : null}
+          </div>
+        )}
 
         {connector.extra && (
           <input
@@ -345,6 +673,19 @@ function ApiExpandedForm({ connector, value, extraValue, onChange, onExtraChange
             <Link01Icon size={10} strokeWidth={2} />
             {connector.linkLabel}
           </a>
+        )}
+
+        {connector.key === 'github_token' && (
+          <div className="mt-1.5">
+            <button
+              onClick={handleGitHubConnect}
+              disabled={oauthBusy}
+              className="btn-green text-[11px] px-3 py-1.5 disabled:opacity-50"
+            >
+              {oauthBusy ? 'Connecting GitHub...' : 'Connect GitHub'}
+            </button>
+            {oauthMsg ? <p className="text-[10px] text-white/45 mt-1.5">{oauthMsg}</p> : null}
+          </div>
         )}
       </div>
     </div>

@@ -149,6 +149,7 @@ const NOAH_BACKEND_URL = resolveBackendUrl();
 let mainWindow = null;
 let floatingBar = null;
 let tray = null;
+let isQuitting = false;
 let isFloatingBarVisible = true;
 let pttActive        = false;
 let pttAccelerator   = 'CmdOrCtrl+Shift+Space';  // globalShortcut fallback
@@ -239,6 +240,12 @@ function createMainWindow() {
   });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return;
+    // Keep Noah resident instead of fully closing; user can quit from tray menu.
+    event.preventDefault();
+    mainWindow.hide();
+  });
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
@@ -862,17 +869,52 @@ ipcMain.handle('start-google-auth', (event, firebaseConfig) => {
 
 // ─── IPC: Task execution ──────────────────────────────────────────────────────
 
-ipcMain.handle('run-shell', async (_, command) => {
+function runShellCommand(payload, defaultTimeoutMs = 30000) {
+  const command = typeof payload === 'string' ? payload : (payload?.command || '');
+  const timeoutMs = Number.isFinite(Number(payload?.timeoutMs)) ? Number(payload.timeoutMs) : defaultTimeoutMs;
+  const cwd = (payload && typeof payload.cwd === 'string' && payload.cwd.trim()) ? payload.cwd : os.homedir();
   return new Promise((resolve) => {
-    exec(command, { timeout: 30000, cwd: os.homedir(), shell: '/bin/bash' }, (err, stdout, stderr) => {
+    exec(command, { timeout: timeoutMs, cwd, shell: '/bin/bash' }, (err, stdout, stderr) => {
       resolve({
         success: !err,
         output: (stdout + stderr).trim() || '(no output)',
+        stdout: (stdout || '').trim(),
+        stderr: (stderr || '').trim(),
         error: err?.message || null,
         exitCode: err?.code || 0,
       });
     });
   });
+}
+
+ipcMain.handle('run-shell', async (_, payload) => {
+  return runShellCommand(payload, 30000);
+});
+
+ipcMain.handle('run-shell-long', async (_, payload) => {
+  // Longer timeout for package installs and auth/device flows.
+  return runShellCommand(payload, 12 * 60 * 1000);
+});
+
+ipcMain.handle('check-playwright', async () => {
+  try {
+    const searchPaths = [
+      app.getAppPath(),
+      __dirname,
+      process.cwd(),
+      path.join(process.resourcesPath || '', 'app.asar'),
+      path.join(process.resourcesPath || '', 'app.asar.unpacked'),
+    ].filter(Boolean);
+
+    const resolved = require.resolve('playwright', { paths: searchPaths });
+    const version = (() => {
+      try { return require('playwright/package.json')?.version || ''; } catch { return ''; }
+    })();
+
+    return { available: true, reason: '', resolved, version };
+  } catch (err) {
+    return { available: false, reason: 'playwright-missing', error: err?.message || 'module-not-found' };
+  }
 });
 
 ipcMain.handle('run-applescript', async (_, script) => {
@@ -1029,6 +1071,11 @@ ipcMain.handle('http-api-call', async (_, { method, url, headers, body, timeoutM
         'Accept': 'application/json',
         ...headers,
       };
+      const byokSummary = {
+        openai: !!(reqHeaders['X-BYOK-OpenAI'] || reqHeaders['x-byok-openai']),
+        deepgram: !!(reqHeaders['X-BYOK-Deepgram'] || reqHeaders['x-byok-deepgram']),
+        openrouter: !!(reqHeaders['X-BYOK-OpenRouter'] || reqHeaders['x-byok-openrouter']),
+      };
       if (bodyStr) {
         reqHeaders['Content-Length'] = Buffer.byteLength(bodyStr);
         if (!reqHeaders['Content-Type']) reqHeaders['Content-Type'] = 'application/json';
@@ -1047,23 +1094,142 @@ ipcMain.handle('http-api-call', async (_, { method, url, headers, body, timeoutM
         let data = '';
         res.on('data', chunk => { if (data.length < 100000) data += chunk; });
         res.on('end', () => {
+          const statusCode = res.statusCode || 0;
+          const statusMessage = res.statusMessage || '';
+          noahLog(`http-api-call ${options.method} ${url} -> ${statusCode} ${statusMessage} byok=${JSON.stringify(byokSummary)}`);
           try {
             const parsed = JSON.parse(data);
-            resolve({ success: true, statusCode: res.statusCode, data: parsed });
+            resolve({ success: true, statusCode, statusMessage, data: parsed });
           } catch {
-            resolve({ success: true, statusCode: res.statusCode, data: data.slice(0, 8000) });
+            resolve({ success: true, statusCode, statusMessage, data: data.slice(0, 8000) });
           }
         });
       });
 
-      req.on('error', err => resolve({ success: false, error: err.message }));
-      req.on('timeout', () => { req.destroy(); resolve({ success: false, error: 'Request timed out' }); });
+      req.on('error', err => {
+        noahLog(`http-api-call ERROR ${options.method} ${url}: ${err.message}`);
+        resolve({ success: false, error: err.message });
+      });
+      req.on('timeout', () => {
+        req.destroy();
+        noahLog(`http-api-call TIMEOUT ${options.method} ${url}`);
+        resolve({ success: false, error: 'Request timed out' });
+      });
       if (bodyStr) req.write(bodyStr);
       req.end();
     } catch (err) {
+      noahLog(`http-api-call EXCEPTION ${method || 'GET'} ${url}: ${err.message}`);
       resolve({ success: false, error: err.message });
     }
   });
+});
+
+// ─── IPC: Streaming HTTP API call (SSE bridge for Hermes) ───────────────────
+const _activeHttpStreams = new Map();
+
+ipcMain.handle('http-api-stream-start', async (event, { streamId, method, url, headers, body, timeoutMs }) => {
+  if (!streamId || !url) return { ok: false, error: 'streamId and url are required' };
+  if (_activeHttpStreams.has(streamId)) return { ok: false, error: 'stream already active' };
+
+  const sender = event.sender;
+  try {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const bodyStr = body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null;
+    const reqHeaders = {
+      'User-Agent': 'Noah-AI-Assistant/1.0',
+      'Accept': 'text/event-stream',
+      ...headers,
+    };
+    if (bodyStr) {
+      reqHeaders['Content-Length'] = Buffer.byteLength(bodyStr);
+      if (!reqHeaders['Content-Type']) reqHeaders['Content-Type'] = 'application/json';
+    }
+
+    const options = {
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: method || 'GET',
+      headers: reqHeaders,
+      timeout: Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 180000,
+    };
+
+    const req = lib.request(options, (res) => {
+      const statusCode = res.statusCode || 0;
+      const statusMessage = res.statusMessage || '';
+      noahLog(`http-api-stream ${options.method} ${url} -> ${statusCode} ${statusMessage}`);
+
+      if (statusCode >= 400) {
+        let errBody = '';
+        res.on('data', (chunk) => { if (errBody.length < 32000) errBody += chunk.toString('utf8'); });
+        res.on('end', () => {
+          sender.send('http-api-stream-event', {
+            streamId,
+            type: 'http_error',
+            statusCode,
+            statusMessage,
+            body: errBody.slice(0, 8000),
+          });
+          _activeHttpStreams.delete(streamId);
+        });
+        return;
+      }
+
+      let buffer = '';
+      res.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trimEnd();
+          if (!trimmed || trimmed.startsWith(':')) continue; // keepalive/comment
+          if (!trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (!data) continue;
+          sender.send('http-api-stream-event', { streamId, type: 'data', data });
+        }
+      });
+
+      res.on('end', () => {
+        sender.send('http-api-stream-event', { streamId, type: 'end' });
+        _activeHttpStreams.delete(streamId);
+      });
+    });
+
+    req.on('error', (err) => {
+      noahLog(`http-api-stream ERROR ${options.method} ${url}: ${err.message}`);
+      sender.send('http-api-stream-event', { streamId, type: 'error', error: err.message });
+      _activeHttpStreams.delete(streamId);
+    });
+
+    req.on('timeout', () => {
+      req.destroy(new Error('Request timed out'));
+      noahLog(`http-api-stream TIMEOUT ${options.method} ${url}`);
+    });
+
+    _activeHttpStreams.set(streamId, req);
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+    return { ok: true };
+  } catch (err) {
+    noahLog(`http-api-stream EXCEPTION ${method || 'GET'} ${url}: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('http-api-stream-stop', async (_, { streamId }) => {
+  try {
+    const req = _activeHttpStreams.get(streamId);
+    if (req) {
+      req.destroy();
+      _activeHttpStreams.delete(streamId);
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
 
 // ─── IPC: Binary TTS synthesis (bypasses renderer CORS for audio endpoints) ──
@@ -1152,6 +1318,7 @@ async function ensureMicPermission() {
 }
 
 app.whenReady().then(async () => {
+  if (process.platform === 'darwin' && app.dock?.show) app.dock.show();
   // ── Chromium-level: auto-approve all mic/media permission requests ─────────
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     callback(['microphone', 'media', 'audioCapture', 'mediakeysystem'].includes(permission));
@@ -1166,7 +1333,7 @@ app.whenReady().then(async () => {
   // Serves the bundled dist/ directory over app://localhost/, giving the
   // renderer a real origin so Firebase Google sign-in works correctly.
   if (!isDev) {
-    const distDir = path.join(__dirname, '../dist');
+    const distDir = path.join(__dirname, '../renderer-dist');
     protocol.handle('app', (request) => {
       const { pathname } = new URL(request.url);
       // Root → index.html; strip leading slash for path.join
@@ -1290,6 +1457,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   if (pttActive) { pttActive = false; try { firePTT(false); } catch {} }
   if (uIOhook)  { try { uIOhook.stop(); } catch {} }
   globalShortcut.unregisterAll();

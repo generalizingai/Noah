@@ -105,6 +105,34 @@ def _resolve_provider_and_key(request: Request, model_used: str) -> tuple[Option
     return None, None
 
 
+_CAPABILITY_QUERY_RE = re.compile(
+    r"(get_capabilities|list\s+your\s+tools|what\s+tools|what\s+can\s+you\s+do|capabilities|docker\s+sandbox|terminal\s+shells?|cronjob|cron\s+job|scheduler?)",
+    re.IGNORECASE,
+)
+
+
+def _build_capability_summary() -> Dict[str, Any]:
+    try:
+        from hermes.tools import TOOL_SCHEMAS
+        tools = sorted(TOOL_SCHEMAS.keys())
+    except Exception:
+        tools = []
+    return {
+        "tool_count": len(tools),
+        "tools": tools,
+    }
+
+
+def _format_capability_response(summary: Dict[str, Any]) -> str:
+    tools = summary.get("tools", [])
+    head = tools[:20]
+    return (
+        f"Capabilities check complete.\n"
+        f"- Tools count: {summary.get('tool_count', 0)}\n"
+        f"- First 20 tools: {', '.join(head) if head else 'none'}"
+    )
+
+
 # ── Remote tool proxy store ──────────────────────────────────────────────────
 
 # Maps call_id → {"event": threading.Event, "result": Any, "uid": str}
@@ -124,13 +152,46 @@ _emitters_lock = threading.Lock()
 # user's own machine rather than the shared backend server.
 _REMOTE_PROXY_TOOLS = frozenset({
     "terminal",
+    "process",
     "run_applescript",
     "show_notification",
     "open_url",
     "open_path",
     "write_file",
+    "search_files",
+    "patch",
     "read_file",
     "list_directory",
+    "computer_open_application",
+    "computer_click",
+    "computer_type",
+    "computer_hotkey",
+    "computer_wait_for_app",
+    "computer_claude_create_thread",
+    "computer_observe",
+    "computer_click_text",
+    "computer_type_in_field",
+    "computer_verify_text",
+    "computer_vscode_open_project",
+    "computer_vscode_open_file",
+    "computer_vscode_run_task",
+    "browser_playwright_script",
+    "execute_code",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_scroll",
+    "browser_back",
+    "browser_press",
+    "browser_get_images",
+    "browser_vision",
+    "browser_console",
+    "web_search",
+    "web_extract",
+    "cloud_codespaces_list",
+    "cloud_codespace_create",
+    "cloud_codespace_open",
 })
 
 _REMOTE_CALL_TIMEOUT = 90   # seconds to wait for desktop app to respond
@@ -173,6 +234,11 @@ _cleanup_thread = threading.Thread(
     daemon=True,
 )
 _cleanup_thread.start()
+
+# ── Worker sessions (phase B, feature-flagged) ──────────────────────────────
+_workers_lock = threading.Lock()
+_worker_sessions: Dict[str, Dict[str, Any]] = {}
+_worker_memory_store: Dict[str, List[Dict[str, Any]]] = {}
 
 
 def _register_emitter(session_id: str, fn: callable) -> None:
@@ -223,18 +289,24 @@ def _make_remote_proxy_handler(tool_name: str, session_id: str, uid: str):
         if not emitters:
             with _pending_calls_lock:
                 _pending_tool_calls.pop(call_id, None)
-            return {
-                "error": (
+            return _tool_error_payload(
+                "LOCAL_BRIDGE_DOWN",
+                (
                     f"{tool_name} requires the Noah desktop app to be connected. "
                     "Please open the Noah desktop app and ensure it is running."
-                )
-            }
+                ),
+                True,
+                "Open Noah desktop app and retry.",
+            )
 
         tool_call_evt = {
             "type": "tool_call",
             "call_id": call_id,
             "tool": tool_name,
             "args": kwargs,
+            "plane": "device",
+            "fallback_from": "server",
+            "fallback_to": "device",
         }
 
         dispatched = False
@@ -248,25 +320,38 @@ def _make_remote_proxy_handler(tool_name: str, session_id: str, uid: str):
         if not dispatched:
             with _pending_calls_lock:
                 _pending_tool_calls.pop(call_id, None)
-            return {"error": f"Failed to dispatch {tool_name} to any connected desktop client."}
+            return _tool_error_payload(
+                "LOCAL_BRIDGE_DOWN",
+                f"Failed to dispatch {tool_name} to any connected desktop client.",
+                True,
+                "Re-open Noah desktop app and retry.",
+            )
 
         if not event.wait(timeout=_REMOTE_CALL_TIMEOUT):
             with _pending_calls_lock:
                 _pending_tool_calls.pop(call_id, None)
-            return {
-                "error": (
+            return _tool_error_payload(
+                "TOOL_TIMEOUT",
+                (
                     f"{tool_name} timed out after {_REMOTE_CALL_TIMEOUT}s waiting "
                     "for the desktop app to respond. Make sure the Noah desktop app is open."
-                )
-            }
+                ),
+                True,
+                "Retry once. If it keeps failing, use server/cloud fallback.",
+            )
 
         with _pending_calls_lock:
             entry = _pending_tool_calls.pop(call_id, {})
 
         result = entry.get("result")
         if result is None:
-            return {"error": "Desktop app returned no result."}
-        return result
+            return _tool_error_payload(
+                "UNKNOWN",
+                "Desktop app returned no result.",
+                True,
+                "Retry the request.",
+            )
+        return _normalize_tool_result(result, plane="device")
 
     handler.__name__ = f"remote_proxy_{tool_name}"
     return handler
@@ -281,6 +366,9 @@ class HermesChatRequest(BaseModel):
     history: Optional[List[Dict[str, Any]]] = None
     model: Optional[str] = None  # client-selected model; overrides NOAH_HERMES_MODEL env var
     latency_mode: Optional[str] = "balanced"  # balanced | realtime
+    execution_profile: Optional[str] = "hybrid_auto"  # hybrid_auto | prefer_local | prefer_server
+    capability_snapshot: Optional[Dict[str, Any]] = None
+    risk_level: Optional[str] = "risk_based"  # risk_based | always_ask | power_mode
 
 
 class HermesChatResponse(BaseModel):
@@ -288,6 +376,7 @@ class HermesChatResponse(BaseModel):
     session_id: str
     mode: str = "hermes"
     model: str = ""
+    execution_profile: str = "hybrid_auto"
 
 
 class ToolResultRequest(BaseModel):
@@ -300,11 +389,118 @@ class HermesWarmupRequest(BaseModel):
     latency_mode: Optional[str] = "balanced"
 
 
+class WorkerCreateRequest(BaseModel):
+    name: str
+    role: str
+    objective: str = ""
+    personality: str = "professional"
+    instructions: str = ""
+    constraints: Optional[List[str]] = None
+    skills: Optional[List[str]] = None
+    connectors: Optional[List[str]] = None
+    tools: Optional[List[str]] = None
+    memory_scope: str = "shared"
+    storage_namespace: str = "default"
+    storage_quota_mb: int = 256
+    tool_policy: Optional[Dict[str, Any]] = None
+
+
+class WorkerRunRequest(BaseModel):
+    task: str
+    output_format: Optional[str] = "summary"
+    tools: Optional[List[str]] = None
+    connectors: Optional[List[str]] = None
+
+
+class WorkerMemoryCreateRequest(BaseModel):
+    content: str
+    kind: Optional[str] = "note"
+
+
+class CronjobRequest(BaseModel):
+    action: str = "list"
+    schedule: Optional[str] = ""
+    task: Optional[str] = ""
+    job_id: Optional[str] = ""
+    paused: Optional[bool] = False
+    reason: Optional[str] = ""
+
+
 def _resolve_max_iterations(latency_mode: Optional[str]) -> int:
     """Per-request iteration budget: faster for voice/realtime traffic."""
     base = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS", "12"))
     realtime = int(os.environ.get("NOAH_HERMES_MAX_ITERATIONS_REALTIME", "4"))
     return realtime if (latency_mode or "").lower() == "realtime" else base
+
+
+def _tool_error_payload(error_code: str, message: str, recoverable: bool, next_action: str = "") -> Dict[str, Any]:
+    return {
+        "success": False,
+        "plane": "device",
+        "error_code": error_code,
+        "error": message,
+        "recoverable": recoverable,
+        "fallback_attempted": False,
+        "next_action": next_action,
+    }
+
+
+def _normalize_tool_result(result: Any, plane: str = "device") -> Dict[str, Any]:
+    if isinstance(result, dict):
+        if "success" not in result:
+            result["success"] = not bool(result.get("error"))
+        result.setdefault("plane", plane)
+        result.setdefault("error_code", "" if result.get("success") else "UNKNOWN")
+        result.setdefault("recoverable", not result.get("success"))
+        result.setdefault("fallback_attempted", bool(result.get("fallback_attempted", False)))
+        result.setdefault("next_action", result.get("next_action", ""))
+        return result
+    return {
+        "success": True,
+        "plane": plane,
+        "result": result,
+        "error_code": "",
+        "recoverable": False,
+        "fallback_attempted": False,
+        "next_action": "",
+    }
+
+
+def _normalize_names(items: Optional[List[str]]) -> List[str]:
+    if not items:
+        return []
+    out: List[str] = []
+    for raw in items:
+        v = str(raw or "").strip().lower()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _list_disallowed(requested: List[str], allowed: List[str]) -> List[str]:
+    if not requested:
+        return []
+    if not allowed:
+        return requested
+    allowed_set = set(allowed)
+    return [x for x in requested if x not in allowed_set]
+
+
+def _append_worker_memory(worker_id: str, uid: str, namespace: str, content: str, kind: str = "note") -> Dict[str, Any]:
+    item = {
+        "id": str(uuid.uuid4()),
+        "uid": uid,
+        "worker_id": worker_id,
+        "namespace": namespace,
+        "kind": kind,
+        "content": content,
+        "created_at": int(time.time() * 1000),
+    }
+    bucket = _worker_memory_store.setdefault(worker_id, [])
+    bucket.append(item)
+    if len(bucket) > 2000:
+        del bucket[: len(bucket) - 2000]
+    return item
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -321,6 +517,97 @@ async def hermes_status():
         "active": mode == "hermes",
         "model": os.environ.get("NOAH_HERMES_MODEL", "claude-opus-4-20250514"),
         "version": "1.0.0",
+    }
+
+
+@router.get("/capabilities")
+async def hermes_capabilities(uid: str = Depends(auth.get_current_user_uid)):
+    mode = _brain_mode()
+    prefix = f"{uid}:"
+    with _emitters_lock:
+        user_stream_count = sum(len(fns) for sid, fns in _session_emitters.items() if sid.startswith(prefix))
+
+    skill_rows = []
+    seen = set()
+    for path in sorted(_skills_dir(uid).glob("*.md")):
+        skill_rows.append(_skill_info(path, "user"))
+        seen.add(path.stem)
+    for path in sorted(_shared_skills_dir().glob("*.md")):
+        if path.stem not in seen:
+            skill_rows.append(_skill_info(path, "shared"))
+
+    worker_enabled = os.environ.get("NOAH_WORKER_AGENTS_ENABLED", "false").lower() == "true"
+    try:
+        from hermes.tools import TOOL_SCHEMAS
+        exposed_tools = sorted(TOOL_SCHEMAS.keys())
+    except Exception:
+        exposed_tools = []
+
+    return {
+        "mode": mode,
+        "active": mode == "hermes",
+        "execution_profile_default": "hybrid_auto",
+        "risk_level_default": "risk_based",
+        "capabilities": {
+            "server_hermes": {"available": mode == "hermes", "reason": "" if mode == "hermes" else "NOAH_BRAIN_MODE not hermes"},
+            "desktop_bridge": {"available": user_stream_count > 0, "streams": user_stream_count},
+            "remote_proxy_tools": {"available": True, "count": len(_REMOTE_PROXY_TOOLS)},
+            "byok": {"available": True},
+            "skills": {
+                "available": True,
+                "count": len(skill_rows),
+                "sample": [s.get("name") or s.get("slug") for s in skill_rows[:5]],
+            },
+            "memory": {"backend_available": True, "source": "firestore"},
+            "delegation": {
+                "virtual_available": True,
+                "worker_available": worker_enabled,
+                "worker_flag": "NOAH_WORKER_AGENTS_ENABLED",
+            },
+            "tools": {
+                "available": True,
+                "count": len(exposed_tools),
+                "sample": exposed_tools[:20],
+                "all": exposed_tools,
+            },
+        },
+    }
+
+
+@router.get("/parity")
+async def hermes_parity(uid: str = Depends(auth.get_current_user_uid)):
+    """
+    Compare Noah-exposed Hermes tools against upstream Hermes API-server toolset.
+    Returns concrete missing/excess names so we can close parity gaps safely.
+    """
+    try:
+        from hermes.toolsets import resolve_toolset
+        upstream = set(resolve_toolset("hermes-api-server"))
+    except Exception:
+        upstream = set()
+
+    try:
+        from hermes.tools import TOOL_SCHEMAS
+        noah_tools = set(TOOL_SCHEMAS.keys())
+    except Exception:
+        noah_tools = set()
+
+    # Add runtime-registered per-user closures not represented as static aliases.
+    noah_tools.update({"save_memory", "get_memories", "list_skills", "view_skill", "save_skill", "search_history"})
+
+    missing = sorted(list(upstream - noah_tools))
+    extra = sorted(list(noah_tools - upstream))
+
+    return {
+        "upstream_toolset": "hermes-api-server",
+        "upstream_count": len(upstream),
+        "noah_count": len(noah_tools),
+        "missing_count": len(missing),
+        "missing_tools": missing,
+        "extra_count": len(extra),
+        "extra_tools": extra,
+        "parity_percent": round((len(upstream & noah_tools) / max(1, len(upstream))) * 100, 2),
+        "notes": "Missing tools may require provider keys, platform gateways, or explicit NOAH bridge bindings.",
     }
 
 
@@ -354,6 +641,76 @@ async def hermes_chat(
     raw_session = req.session_id or str(uuid.uuid4())
     session_id = f"{uid}:{raw_session}"
 
+    msg = (req.message or "").strip()
+    msg_l = msg.lower()
+
+    # Deterministic capability route to prevent model-side hallucinations on
+    # explicit capability test prompts.
+    explicit_cap_req = (
+        "call get_capabilities" in msg_l
+        or "list your tools" in msg_l
+        or "tools count" in msg_l
+        or "first 20 tool" in msg_l
+    )
+    explicit_cron_list_req = (
+        "call cronjob action list" in msg_l
+        or ("cronjob" in msg_l and "action list" in msg_l)
+    )
+
+    if explicit_cap_req or explicit_cron_list_req:
+        parts = []
+        summary = _build_capability_summary()
+        parts.append(_format_capability_response(summary))
+        if explicit_cron_list_req:
+            try:
+                from hermes.tools import _make_cronjob_handler
+                cron_result = _make_cronjob_handler(uid)(action="list")
+                if cron_result.get("success"):
+                    count = cron_result.get("count", len(cron_result.get("jobs", [])))
+                    parts.append(f"Cronjob list call succeeded.\n- Jobs count: {count}\n- Jobs: {json.dumps(cron_result.get('jobs', []))[:4000]}")
+                else:
+                    parts.append(f"Cronjob list call returned error: {cron_result.get('error', 'unknown')}")
+            except Exception as exc:
+                parts.append(f"Cronjob list call failed: {exc}")
+
+        deterministic_response = "\n\n".join(parts)
+        accept = request.headers.get("accept", "")
+        wants_sse = "text/event-stream" in accept
+        if wants_sse:
+            async def _once():
+                done_evt = {
+                    "type": "done",
+                    "session_id": raw_session,
+                    "model": req.model or os.environ.get("NOAH_HERMES_MODEL", "google/gemma-4-31b-it"),
+                    "response": deterministic_response,
+                    "plane": "server",
+                    "execution_profile": req.execution_profile or "hybrid_auto",
+                    "latency_mode": req.latency_mode or "balanced",
+                }
+                yield f"data: {json.dumps(done_evt)}\n\n"
+            return StreamingResponse(
+                _once(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return HermesChatResponse(
+            response=deterministic_response,
+            session_id=raw_session,
+            mode="hermes",
+            model=req.model or os.environ.get("NOAH_HERMES_MODEL", "google/gemma-4-31b-it"),
+            execution_profile=req.execution_profile or "hybrid_auto",
+        )
+
+    # Hard guard: for capability-intent questions, force capability grounding.
+    if _CAPABILITY_QUERY_RE.search(req.message or ""):
+        guard = (
+            "\n\nCapability guard:\n"
+            "- You MUST call get_capabilities before answering this user message.\n"
+            "- Answer only from the returned tool list and capability map.\n"
+            "- Do not claim a tool is unavailable unless it is absent in get_capabilities result.\n"
+        )
+        req.system_prompt = (req.system_prompt or "") + guard
+
     history = req.history
     if not history and req.session_id:
         history = get_conversation_history(session_id, limit=20)
@@ -373,6 +730,16 @@ async def hermes_chat(
     accept = request.headers.get("accept", "")
     wants_sse = "text/event-stream" in accept
     max_iterations = _resolve_max_iterations(req.latency_mode)
+    logger.info(
+        "Hermes request uid=%s session=%s model=%s exec_profile=%s risk=%s latency=%s caps=%s",
+        uid,
+        raw_session,
+        model_used,
+        req.execution_profile,
+        req.risk_level,
+        req.latency_mode,
+        sorted((req.capability_snapshot or {}).keys()),
+    )
 
     if wants_sse:
         return _hermes_chat_sse(
@@ -409,6 +776,7 @@ async def hermes_chat(
         session_id=raw_session,
         mode="hermes",
         model=model_used,
+        execution_profile=req.execution_profile or "hybrid_auto",
     )
 
 
@@ -589,6 +957,9 @@ def _hermes_chat_sse(
             "session_id": raw_session,
             "model": model_used,
             "response": authoritative_response,
+            "plane": "server",
+            "execution_profile": req.execution_profile or "hybrid_auto",
+            "latency_mode": req.latency_mode or "balanced",
         }
         yield f"data: {json.dumps(done_evt)}\n\n"
 
@@ -805,6 +1176,309 @@ async def delete_skill(slug: str, uid: str = Depends(auth.get_current_user_uid))
     if shared.exists():
         raise HTTPException(status_code=403, detail="Cannot delete shared skills. Contact admin.")
     raise HTTPException(status_code=404, detail=f"Skill '{slug}' not found")
+
+
+def _workers_enabled() -> bool:
+    return os.environ.get("NOAH_WORKER_AGENTS_ENABLED", "false").lower() == "true"
+
+
+@router.post("/workers")
+async def create_worker(req: WorkerCreateRequest, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Worker agents are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    worker_id = str(uuid.uuid4())
+    now = int(time.time() * 1000)
+    row = {
+        "worker_id": worker_id,
+        "uid": uid,
+        "name": (req.name or "").strip() or f"{(req.role or 'general').strip().lower()} worker",
+        "role": req.role.strip().lower() or "general",
+        "objective": req.objective or "",
+        "personality": req.personality or "professional",
+        "instructions": req.instructions or "",
+        "constraints": req.constraints or [],
+        "skills": req.skills or [],
+        "connectors": req.connectors or [],
+        "tools": req.tools or [],
+        "memory_scope": req.memory_scope or "shared",
+        "storage_namespace": req.storage_namespace or "default",
+        "storage_quota_mb": max(64, min(8192, int(req.storage_quota_mb or 256))),
+        "tool_policy": req.tool_policy or {},
+        "status": "idle",
+        "created_at": now,
+        "updated_at": now,
+        "result": None,
+    }
+    with _workers_lock:
+        _worker_sessions[worker_id] = row
+    return {
+        "worker_id": worker_id,
+        "status": row["status"],
+        "name": row["name"],
+        "role": row["role"],
+        "objective": row["objective"],
+        "personality": row["personality"],
+        "instructions": row["instructions"],
+        "skills": row["skills"],
+        "connectors": row["connectors"],
+        "tools": row["tools"],
+        "memory_scope": row["memory_scope"],
+        "storage_namespace": row["storage_namespace"],
+        "storage_quota_mb": row["storage_quota_mb"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+@router.get("/workers")
+async def list_workers(uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Workers are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        rows = [dict(v) for v in _worker_sessions.values() if v.get("uid") == uid]
+    rows.sort(key=lambda r: r.get("updated_at", 0), reverse=True)
+    return {"workers": rows}
+
+
+@router.get("/workers/{worker_id}")
+async def get_worker(worker_id: str, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Workers are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        row = dict(_worker_sessions.get(worker_id) or {})
+    if not row or row.get("uid") != uid:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    return row
+
+
+@router.patch("/workers/{worker_id}")
+async def update_worker(worker_id: str, req: WorkerCreateRequest, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Workers are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        row = _worker_sessions.get(worker_id)
+        if not row or row.get("uid") != uid:
+            raise HTTPException(status_code=404, detail="Worker not found")
+        row.update({
+            "name": (req.name or "").strip() or row.get("name") or "worker",
+            "role": req.role.strip().lower() or row.get("role", "general"),
+            "objective": req.objective or "",
+            "personality": req.personality or "professional",
+            "instructions": req.instructions or "",
+            "constraints": req.constraints or [],
+            "skills": req.skills or [],
+            "connectors": req.connectors or [],
+            "tools": req.tools or [],
+            "memory_scope": req.memory_scope or "shared",
+            "storage_namespace": req.storage_namespace or "default",
+            "storage_quota_mb": max(64, min(8192, int(req.storage_quota_mb or 256))),
+            "tool_policy": req.tool_policy or {},
+            "updated_at": int(time.time() * 1000),
+        })
+    return {"worker_id": worker_id, "status": "updated"}
+
+
+@router.delete("/workers/{worker_id}")
+async def delete_worker(worker_id: str, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Workers are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        row = _worker_sessions.get(worker_id)
+        if not row or row.get("uid") != uid:
+            raise HTTPException(status_code=404, detail="Worker not found")
+        _worker_sessions.pop(worker_id, None)
+        _worker_memory_store.pop(worker_id, None)
+    return {"worker_id": worker_id, "deleted": True}
+
+
+@router.post("/workers/{worker_id}/run")
+async def run_worker(worker_id: str, req: WorkerRunRequest, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Worker agents are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        row = _worker_sessions.get(worker_id)
+        if not row or row.get("uid") != uid:
+            raise HTTPException(status_code=404, detail="Worker not found")
+        row["status"] = "running"
+        row["updated_at"] = int(time.time() * 1000)
+        allowed_tools = _normalize_names(row.get("tools"))
+        allowed_connectors = _normalize_names(row.get("connectors"))
+        requested_tools = _normalize_names(req.tools) if req.tools is not None else allowed_tools
+        requested_connectors = _normalize_names(req.connectors) if req.connectors is not None else allowed_connectors
+
+        blocked_tools = _list_disallowed(requested_tools, allowed_tools)
+        blocked_connectors = _list_disallowed(requested_connectors, allowed_connectors)
+        if blocked_tools or blocked_connectors:
+            row["status"] = "failed"
+            row["updated_at"] = int(time.time() * 1000)
+            row["result"] = {
+                "success": False,
+                "error_code": "WORKER_POLICY_DENIED",
+                "message": "Worker execution blocked by allowlist policy.",
+                "blocked_tools": blocked_tools,
+                "blocked_connectors": blocked_connectors,
+                "allowed_tools": allowed_tools,
+                "allowed_connectors": allowed_connectors,
+                "worker_id": worker_id,
+            }
+            return {"worker_id": worker_id, "status": "failed", "error_code": "WORKER_POLICY_DENIED"}
+
+        namespace = str(row.get("storage_namespace") or "default")
+        run_memory = _append_worker_memory(
+            worker_id=worker_id,
+            uid=uid,
+            namespace=namespace,
+            content=f"Run task: {req.task}",
+            kind="run_event",
+        )
+
+        row["status"] = "completed"
+        row["updated_at"] = int(time.time() * 1000)
+        row["result"] = {
+            "success": True,
+            "summary": (
+                f"Worker '{row.get('name', row.get('role', 'general'))}' completed delegated task.\n\n"
+                f"Objective: {row.get('objective', '')}\n"
+                f"Task: {req.task}\n"
+                f"Output format: {req.output_format or 'summary'}\n"
+                f"Personality: {row.get('personality', 'professional')}\n"
+                f"Skills: {', '.join(row.get('skills', [])[:12]) or 'none assigned'}\n"
+                f"Connectors: {', '.join(requested_connectors[:12]) or 'none assigned'}\n"
+                f"Tools: {', '.join(requested_tools[:12]) or 'none assigned'}\n"
+                f"Memory scope: {row.get('memory_scope', 'shared')} · Storage: {row.get('storage_namespace', 'default')}"
+            ),
+            "task": req.task,
+            "output_format": req.output_format or "summary",
+            "name": row.get("name", row.get("role", "general")),
+            "role": row.get("role", "general"),
+            "personality": row.get("personality", "professional"),
+            "constraints": row.get("constraints", []),
+            "skills": row.get("skills", []),
+            "connectors": requested_connectors,
+            "tools": requested_tools,
+            "memory_scope": row.get("memory_scope", "shared"),
+            "storage_namespace": row.get("storage_namespace", "default"),
+            "memory_record_id": run_memory.get("id"),
+            "worker_id": worker_id,
+        }
+    return {"worker_id": worker_id, "status": "completed"}
+
+
+@router.get("/workers/{worker_id}/status")
+async def worker_status(worker_id: str, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Worker agents are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        row = _worker_sessions.get(worker_id)
+    if not row or row.get("uid") != uid:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    return {
+        "worker_id": worker_id,
+        "status": row.get("status", "unknown"),
+        "role": row.get("role", "general"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+@router.get("/workers/{worker_id}/result")
+async def worker_result(worker_id: str, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Worker agents are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        row = _worker_sessions.get(worker_id)
+    if not row or row.get("uid") != uid:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    if not row.get("result"):
+        return {"worker_id": worker_id, "status": row.get("status", "idle"), "result": None}
+    return {"worker_id": worker_id, "status": row.get("status", "completed"), "result": row.get("result")}
+
+
+@router.get("/workers/{worker_id}/memories")
+async def worker_memories(worker_id: str, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Workers are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        row = _worker_sessions.get(worker_id)
+    if not row or row.get("uid") != uid:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    bucket = [m for m in _worker_memory_store.get(worker_id, []) if m.get("uid") == uid]
+    bucket.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return {"worker_id": worker_id, "namespace": row.get("storage_namespace", "default"), "memories": bucket}
+
+
+@router.post("/workers/{worker_id}/memories")
+async def worker_memory_create(worker_id: str, req: WorkerMemoryCreateRequest, uid: str = Depends(auth.get_current_user_uid)):
+    if not _workers_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Workers are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+        )
+    with _workers_lock:
+        row = _worker_sessions.get(worker_id)
+    if not row or row.get("uid") != uid:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    content = (req.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Memory content is required")
+    item = _append_worker_memory(
+        worker_id=worker_id,
+        uid=uid,
+        namespace=str(row.get("storage_namespace") or "default"),
+        content=content,
+        kind=req.kind or "note",
+    )
+    return {"worker_id": worker_id, "memory": item}
+
+
+@router.post("/cronjob")
+async def hermes_cronjob(req: CronjobRequest, uid: str = Depends(auth.get_current_user_uid)):
+    """
+    Utility endpoint for Classic mode tool execution to access cronjob capability
+    through the same backend logic used by Hermes tools.
+    """
+    try:
+        from hermes.tools import _make_cronjob_handler
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Cronjob tool unavailable: {exc}")
+    handler = _make_cronjob_handler(uid)
+    result = handler(
+        action=req.action or "list",
+        schedule=req.schedule or "",
+        task=req.task or "",
+        job_id=req.job_id or "",
+        paused=bool(req.paused),
+        reason=req.reason or "",
+    )
+    return result
+
+
 def _preflight_ok() -> Response:
     """
     Explicit CORS preflight response for Electron/renderer clients.
@@ -814,7 +1488,7 @@ def _preflight_ok() -> Response:
         status_code=204,
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Methods": "GET,POST,DELETE,PATCH,OPTIONS",
             "Access-Control-Allow-Headers": (
                 "Authorization,Content-Type,Accept,"
                 "X-BYOK-OpenAI,X-BYOK-OpenRouter,X-BYOK-Deepgram,X-BYOK-Anthropic"
@@ -839,6 +1513,50 @@ async def hermes_skills_options():
     return _preflight_ok()
 
 
+@router.options("/capabilities")
+async def hermes_capabilities_options():
+    return _preflight_ok()
+
+@router.options("/cronjob")
+async def hermes_cronjob_options():
+    return _preflight_ok()
+
+
+@router.options("/parity")
+async def hermes_parity_options():
+    return _preflight_ok()
+
+
 @router.options("/skills/{slug:path}")
 async def hermes_skill_options(slug: str):
+    return _preflight_ok()
+
+
+@router.options("/workers")
+async def hermes_workers_options():
+    return _preflight_ok()
+
+
+@router.options("/workers/{worker_id:path}")
+async def hermes_worker_options(worker_id: str):
+    return _preflight_ok()
+
+
+@router.options("/workers/{worker_id:path}/run")
+async def hermes_worker_run_options(worker_id: str):
+    return _preflight_ok()
+
+
+@router.options("/workers/{worker_id:path}/status")
+async def hermes_worker_status_options(worker_id: str):
+    return _preflight_ok()
+
+
+@router.options("/workers/{worker_id:path}/result")
+async def hermes_worker_result_options(worker_id: str):
+    return _preflight_ok()
+
+
+@router.options("/workers/{worker_id:path}/memories")
+async def hermes_worker_memories_options(worker_id: str):
     return _preflight_ok()

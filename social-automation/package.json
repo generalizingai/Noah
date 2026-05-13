@@ -1,0 +1,16 @@
+{
+  "name": "social-automation",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Daily AI carousel automation for Instagram and Facebook",
+  "scripts": {
+    "post": "node src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.49.4",
+    "axios": "^1.9.0",
+    "dotenv": "^16.5.0",
+    "sharp": "^0.34.2"
+  }
+}

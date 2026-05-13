@@ -4,7 +4,6 @@ import { analyzeScreenshot, sendVoiceQuery, getHermesSessions, getHermesSessionH
 import { VoiceRecorder } from '../services/voiceRecorder';
 import { speak, stopSpeaking, isTTSAvailable, onSpeakingStateChange } from '../services/tts';
 import { PTTManager, getPTTKeyLabel } from '../services/ptt';
-import { extractAndSaveMemories } from '../services/memory';
 import { saveConversation } from '../services/conversations';
 import { NoahLogo } from '../App';
 import {
@@ -585,8 +584,6 @@ export default function AssistantTab({ messages, setMessages }) {
       console.log('[Noah] About to call speakResponse with speakerOn:', speakerOn);
       speakResponse(answer);
 
-      // Extract and save memories in background (non-blocking)
-      extractAndSaveMemories(text, answer).catch(() => {});
     } catch (err) {
       setCurrentAction(null);
       if (streamingRef.current) {
@@ -676,7 +673,7 @@ export default function AssistantTab({ messages, setMessages }) {
               </p>
             </div>
             <ScreenWatchBadge active={screenWatchOn} onClick={() => setScreenWatchOn(v => !v)} />
-            {/* History (Hermes mode only) */}
+            {/* History (Combat mode only) */}
             {isHermesMode && (
               <button onClick={openHistory} className="btn-icon" title="Past conversations">
                 <Clock01Icon size={13} strokeWidth={1.8} />
@@ -736,7 +733,7 @@ export default function AssistantTab({ messages, setMessages }) {
             <div className="flex flex-col items-center gap-2 py-12 text-white/28 text-xs text-center">
               <Clock01Icon size={28} strokeWidth={1.4} />
               <span>No past conversations yet</span>
-              <span className="text-white/18">Hermes saves sessions automatically as you chat</span>
+              <span className="text-white/18">Combat saves sessions automatically as you chat</span>
             </div>
           )}
           {!historyLoading && historySessions.map((session) => (

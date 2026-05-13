@@ -5,6 +5,9 @@
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite --port 5173\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev:stack": "bash ./scripts/dev-stack.sh",
+    "smoke": "bash ./scripts/smoke-test.sh",
+    "release:check": "bash ./scripts/release-check.sh",
     "vite": "vite",
     "electron": "electron .",
     "build": "vite build && electron-builder",
@@ -17,6 +20,7 @@
     "firebase": "^11.0.0",
     "hugeicons-react": "^0.4.0",
     "openai": "^4.104.0",
+    "playwright": "^1.59.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "uiohook-napi": "^1.5.4"
@@ -50,7 +54,7 @@
       "identity": null
     },
     "files": [
-      "dist/**/*",
+      "renderer-dist/**/*",
       "electron/**/*",
       "assets/**/*",
       "node_modules/**/*",
