@@ -28,9 +28,6 @@ jobs:
   build-mac:
     name: Build macOS DMG
     runs-on: macos-14    # Apple Silicon runner — fastest native M1 build
-    env:
-      # Evaluate secret presence at job level — can then be used in step if: conditions
-      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
 
     steps:
       # ── 1. Checkout ────────────────────────────────────────────────────────
@@ -54,9 +51,29 @@ jobs:
       - name: Verify app icon
         run: ls -lh artifacts/desktop/assets/icon.icns
 
-      # ── 5. Import Apple Developer certificate (skipped if no secrets) ───────
+      # ── 5. Require signing + notarization secrets ───────────────────────────
+      - name: Validate signing/notarization secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=0
+          for key in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!key}" ]; then
+              echo "Missing required secret: $key"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Release build blocked: required signing/notarization secrets are missing."
+            exit 1
+          fi
+
+      # ── 6. Import Apple Developer certificate ───────────────────────────────
       - name: Import certificate
-        if: env.HAS_CERT == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -77,7 +94,7 @@ jobs:
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> $GITHUB_ENV
 
-      # ── 6. Build + package ──────────────────────────────────────────────────
+      # ── 7. Build + package ──────────────────────────────────────────────────
       - name: Build and publish DMG
         working-directory: artifacts/desktop
         env:
@@ -93,7 +110,7 @@ jobs:
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           npm run release
 
-      # ── 7. Clean release notes (remove Replit commit metadata) ────────────
+      # ── 8. Clean release notes (remove Replit commit metadata) ────────────
       - name: Set clean release notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -118,7 +135,7 @@ jobs:
           echo "Warning: could not update release notes — release may still be processing."
           exit 0
 
-      # ── 8. Confirm ─────────────────────────────────────────────────────────
+      # ── 9. Confirm ─────────────────────────────────────────────────────────
       - name: List release artifacts
         working-directory: artifacts/desktop/dist
         run: ls -lh *.dmg *.zip latest-mac.yml 2>/dev/null || true
