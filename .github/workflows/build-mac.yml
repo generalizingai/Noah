@@ -3,8 +3,8 @@ name: Build & Release Noah Desktop (macOS)
 # Trigger: push a tag like  noah-v1.0.1
 # What it does:
 #   1. Builds the Vite frontend
-#   2. Packages it into a signed + notarized .dmg and .zip with electron-builder
-#   3. Uploads both files to a GitHub Release
+#   2. If Apple secrets exist: signed + notarized .dmg/.zip and release upload
+#   3. If Apple secrets are missing: unsigned .dmg/.zip build + workflow artifacts
 #
 # Required GitHub Secrets (Settings → Secrets → Actions):
 #   APPLE_CERTIFICATE          — base64-encoded Developer ID Application .p12
@@ -13,8 +13,7 @@ name: Build & Release Noah Desktop (macOS)
 #   APPLE_APP_SPECIFIC_PASSWORD — app-specific password (appleid.apple.com)
 #   APPLE_TEAM_ID              — 10-char Team ID (developer.apple.com → Account)
 #
-# Signing is skipped if the certificate secrets are absent (produces an
-# unsigned DMG — useful for beta testing / internal distribution).
+# Without Apple secrets, this workflow still passes and uploads unsigned artifacts.
 
 on:
   push:
@@ -51,8 +50,9 @@ jobs:
       - name: Verify app icon
         run: ls -lh artifacts/desktop/assets/icon.icns
 
-      # ── 5. Require signing + notarization secrets ───────────────────────────
-      - name: Validate signing/notarization secrets
+      # ── 5. Detect whether signing + notarization secrets are available ─────
+      - name: Detect signing/notarization secrets
+        id: signing
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -63,17 +63,21 @@ jobs:
           missing=0
           for key in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!key}" ]; then
-              echo "Missing required secret: $key"
+              echo "Missing signing secret: $key"
               missing=1
             fi
           done
-          if [ "$missing" -ne 0 ]; then
-            echo "Release build blocked: required signing/notarization secrets are missing."
-            exit 1
+          if [ "$missing" -eq 0 ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Signing/notarization path enabled."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Signing/notarization secrets incomplete. Using unsigned fallback path."
           fi
 
       # ── 6. Import Apple Developer certificate ───────────────────────────────
       - name: Import certificate
+        if: steps.signing.outputs.enabled == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -96,6 +100,7 @@ jobs:
 
       # ── 7. Build + package ──────────────────────────────────────────────────
       - name: Build and publish DMG
+        if: steps.signing.outputs.enabled == 'true'
         working-directory: artifacts/desktop
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -110,8 +115,20 @@ jobs:
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           npm run release
 
+      # ── 7b. Unsigned fallback build (no release publish) ───────────────────
+      - name: Build unsigned mac artifacts
+        if: steps.signing.outputs.enabled != 'true'
+        working-directory: artifacts/desktop
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_VERSION#noah-v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npm run build:mac
+
       # ── 8. Clean release notes (remove Replit commit metadata) ────────────
       - name: Set clean release notes
+        if: steps.signing.outputs.enabled == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ github.ref_name }}
@@ -134,6 +151,18 @@ jobs:
           done
           echo "Warning: could not update release notes — release may still be processing."
           exit 0
+
+      # ── 8b. Upload unsigned artifacts to workflow run ──────────────────────
+      - name: Upload unsigned build artifacts
+        if: steps.signing.outputs.enabled != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: noah-mac-unsigned-${{ github.ref_name }}
+          path: |
+            artifacts/desktop/dist/*.dmg
+            artifacts/desktop/dist/*.zip
+            artifacts/desktop/dist/latest-mac.yml
+          if-no-files-found: warn
 
       # ── 9. Confirm ─────────────────────────────────────────────────────────
       - name: List release artifacts
