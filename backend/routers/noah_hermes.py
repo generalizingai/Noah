@@ -110,6 +110,32 @@ _CAPABILITY_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_DELEGATION_QUERY_RE = re.compile(
+    r"((deploy|spawn|create|launch|start|build).{0,80}(worker|sub[-\s_/]?agent|agent|specialist))|((delegate|assign).{0,30}(this|it|task|work|job|objective|request).{0,20}to.{0,25}(worker|sub[-\s_/]?agent|agent|specialist))",
+    re.IGNORECASE,
+)
+
+def _normalize_intent_text(text: str) -> str:
+    value = str(text or "").lower()
+    # normalize common Unicode dashes/slashes so regex intent checks are stable
+    value = re.sub(r"[\u2010-\u2015\u2212]", "-", value)
+    value = value.replace("／", "/").replace("∕", "/")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _infer_delegate_role(text_l: str) -> str:
+    value = _normalize_intent_text(text_l)
+    if re.search(r"\b(seo|serp|keyword|backlink|on-page)\b", value):
+        return "seo"
+    if re.search(r"\b(thread|threads|content|copy|linkedin|twitter|x\b|facebook|post|viral)\b", value):
+        return "content"
+    if re.search(r"\b(code|coding|developer|debug|app|website|program)\b", value):
+        return "coding"
+    if re.search(r"\b(research|analy[sz]e|investigate|compare)\b", value):
+        return "research"
+    return "ops"
+
 
 def _build_capability_summary() -> Dict[str, Any]:
     try:
@@ -493,6 +519,73 @@ def _normalize_names(items: Optional[List[str]]) -> List[str]:
     return out
 
 
+_WORKER_MAX_TOOLS_DEFAULT = max(1, min(64, int(os.environ.get("NOAH_WORKER_MAX_TOOLS", "20"))))
+_WORKER_TOOL_PRIORITY = [
+    "terminal",
+    "shell",
+    "read",
+    "write",
+    "file",
+    "search",
+    "web",
+    "fetch",
+    "memory",
+    "cron",
+    "automation",
+    "browser",
+]
+
+
+def _cap_worker_tools(items: List[str], limit: Optional[int] = None) -> List[str]:
+    max_tools = int(limit or _WORKER_MAX_TOOLS_DEFAULT)
+    if max_tools < 1:
+        max_tools = 1
+    if len(items) <= max_tools:
+        return items
+    return items[:max_tools]
+
+
+def _select_runtime_tools(requested: List[str], available: List[str], limit: Optional[int] = None) -> List[str]:
+    max_tools = int(limit or _WORKER_MAX_TOOLS_DEFAULT)
+    if max_tools < 1:
+        max_tools = 1
+    if not available:
+        return _cap_worker_tools(requested, max_tools)
+
+    available_map = {name.lower(): name for name in available}
+    selected: List[str] = []
+
+    # First honor explicit requested tools (if present).
+    for raw in requested or []:
+        key = str(raw or "").strip().lower()
+        if not key:
+            continue
+        actual = available_map.get(key)
+        if actual and actual not in selected:
+            selected.append(actual)
+            if len(selected) >= max_tools:
+                return selected
+
+    if selected:
+        return selected
+
+    # Otherwise pick a stable, capability-rich subset by priority.
+    for hint in _WORKER_TOOL_PRIORITY:
+        for name in available:
+            key = name.lower()
+            if hint in key and name not in selected:
+                selected.append(name)
+                if len(selected) >= max_tools:
+                    return selected
+
+    for name in available:
+        if name not in selected:
+            selected.append(name)
+            if len(selected) >= max_tools:
+                return selected
+    return selected
+
+
 def _list_disallowed(requested: List[str], allowed: List[str]) -> List[str]:
     if not requested:
         return []
@@ -709,7 +802,7 @@ async def hermes_chat(
     session_id = f"{uid}:{raw_session}"
 
     msg = _extract_message_text(req.message).strip()
-    msg_l = msg.lower()
+    msg_l = _normalize_intent_text(msg)
 
     # Deterministic capability route to prevent model-side hallucinations on
     # explicit capability test prompts.
@@ -723,6 +816,97 @@ async def hermes_chat(
         "call cronjob action list" in msg_l
         or ("cronjob" in msg_l and "action list" in msg_l)
     )
+    explicit_delegate_req = bool(_DELEGATION_QUERY_RE.search(msg_l))
+
+    if explicit_delegate_req:
+        if not _workers_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail="Worker agents are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
+            )
+
+        role = _infer_delegate_role(msg_l)
+        worker_name = f"{role.title()} Specialist"
+        created = await create_worker(
+            WorkerCreateRequest(
+                name=worker_name,
+                role=role,
+                objective=msg[:1200],
+                personality="professional",
+                instructions=(
+                    "Execute delegated objective end-to-end. "
+                    "Use available Hermes capabilities and return concrete outputs only."
+                ),
+                constraints=[],
+                skills=[],
+                connectors=[],
+                tools=[],
+                memory_scope="shared",
+                storage_namespace=f"auto_{role}",
+                storage_quota_mb=256,
+                tool_policy={},
+            ),
+            uid,
+        )
+        worker_id = str(created.get("worker_id") or "")
+        if not worker_id:
+            raise HTTPException(status_code=500, detail="Worker creation failed: missing worker_id")
+
+        run_out = await run_worker(
+            request,
+            worker_id,
+            WorkerRunRequest(
+                task=msg,
+                output_format="report",
+                tools=[],
+                connectors=[],
+            ),
+            uid,
+        )
+        status_out = await worker_status(worker_id, uid)
+        result_out = await worker_result(worker_id, uid)
+        result_obj = result_out.get("result") or {}
+        final_status = str(status_out.get("status") or run_out.get("status") or "unknown")
+        summary = (
+            str(result_obj.get("summary") or result_obj.get("message") or "").strip()
+            or ("Worker completed delegated task." if final_status == "completed" else "Worker run failed.")
+        )
+        task_id = f"task_worker_{worker_id}"
+        deterministic_response = (
+            "Worker deployed and task delegated.\n"
+            f"- Role: {role}\n"
+            f"- Worker ID: {worker_id}\n"
+            f"- Task ID: {task_id}\n"
+            f"- Status: {final_status}\n\n"
+            f"{summary}"
+        )
+
+        accept = request.headers.get("accept", "")
+        wants_sse = "text/event-stream" in accept
+        if wants_sse:
+            async def _once_delegate():
+                done_evt = {
+                    "type": "done",
+                    "session_id": raw_session,
+                    "model": req.model or os.environ.get("NOAH_HERMES_MODEL", "google/gemma-4-31b-it"),
+                    "response": deterministic_response,
+                    "plane": "server",
+                    "execution_profile": req.execution_profile or "hybrid_auto",
+                    "latency_mode": req.latency_mode or "balanced",
+                }
+                yield f"data: {json.dumps(done_evt)}\n\n"
+            return StreamingResponse(
+                _once_delegate(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return HermesChatResponse(
+            response=deterministic_response,
+            session_id=raw_session,
+            mode="hermes",
+            model=req.model or os.environ.get("NOAH_HERMES_MODEL", "google/gemma-4-31b-it"),
+            execution_profile=req.execution_profile or "hybrid_auto",
+        )
 
     if explicit_cap_req or explicit_cron_list_req:
         parts = []
@@ -769,12 +953,22 @@ async def hermes_chat(
         )
 
     # Hard guard: for capability-intent questions, force capability grounding.
-    if _CAPABILITY_QUERY_RE.search(msg):
+    if _CAPABILITY_QUERY_RE.search(msg_l):
         guard = (
             "\n\nCapability guard:\n"
             "- You MUST call get_capabilities before answering this user message.\n"
             "- Answer only from the returned tool list and capability map.\n"
             "- Do not claim a tool is unavailable unless it is absent in get_capabilities result.\n"
+        )
+        req.system_prompt = (req.system_prompt or "") + guard
+
+    if _DELEGATION_QUERY_RE.search(msg_l):
+        guard = (
+            "\n\nDelegation guard:\n"
+            "- User explicitly asked to deploy/spawn/create a worker or sub-agent.\n"
+            "- You MUST call delegate_task before answering.\n"
+            "- Return worker_id and task_id from the tool result.\n"
+            "- Do not reply with planning-only text.\n"
         )
         req.system_prompt = (req.system_prompt or "") + guard
 
@@ -1269,7 +1463,7 @@ async def create_worker(req: WorkerCreateRequest, uid: str = Depends(auth.get_cu
         "constraints": req.constraints or [],
         "skills": req.skills or [],
         "connectors": req.connectors or [],
-        "tools": req.tools or [],
+        "tools": _cap_worker_tools(_normalize_names(req.tools), _WORKER_MAX_TOOLS_DEFAULT),
         "memory_scope": req.memory_scope or "shared",
         "storage_namespace": req.storage_namespace or "default",
         "storage_quota_mb": max(64, min(8192, int(req.storage_quota_mb or 256))),
@@ -1347,7 +1541,7 @@ async def update_worker(worker_id: str, req: WorkerCreateRequest, uid: str = Dep
             "constraints": req.constraints or [],
             "skills": req.skills or [],
             "connectors": req.connectors or [],
-            "tools": req.tools or [],
+            "tools": _cap_worker_tools(_normalize_names(req.tools), _WORKER_MAX_TOOLS_DEFAULT),
             "memory_scope": req.memory_scope or "shared",
             "storage_namespace": req.storage_namespace or "default",
             "storage_quota_mb": max(64, min(8192, int(req.storage_quota_mb or 256))),
@@ -1374,12 +1568,23 @@ async def delete_worker(worker_id: str, uid: str = Depends(auth.get_current_user
 
 
 @router.post("/workers/{worker_id}/run")
-async def run_worker(worker_id: str, req: WorkerRunRequest, uid: str = Depends(auth.get_current_user_uid)):
+async def run_worker(
+    request: Request,
+    worker_id: str,
+    req: WorkerRunRequest,
+    uid: str = Depends(auth.get_current_user_uid),
+):
     if not _workers_enabled():
         raise HTTPException(
             status_code=503,
             detail="Worker agents are disabled. Set NOAH_WORKER_AGENTS_ENABLED=true to enable.",
         )
+    if _brain_mode() != "hermes":
+        raise HTTPException(
+            status_code=503,
+            detail="Worker execution requires backend NOAH_BRAIN_MODE=hermes.",
+        )
+
     with _workers_lock:
         row = _worker_sessions.get(worker_id)
         if not row or row.get("uid") != uid:
@@ -1390,63 +1595,165 @@ async def run_worker(worker_id: str, req: WorkerRunRequest, uid: str = Depends(a
         allowed_connectors = _normalize_names(row.get("connectors"))
         requested_tools = _normalize_names(req.tools) if req.tools is not None else allowed_tools
         requested_connectors = _normalize_names(req.connectors) if req.connectors is not None else allowed_connectors
+        requested_tools = _cap_worker_tools(requested_tools, _WORKER_MAX_TOOLS_DEFAULT)
+        worker_snapshot = dict(row)
 
-        blocked_tools = _list_disallowed(requested_tools, allowed_tools)
-        blocked_connectors = _list_disallowed(requested_connectors, allowed_connectors)
-        if blocked_tools or blocked_connectors:
-            row["status"] = "failed"
-            row["updated_at"] = int(time.time() * 1000)
-            row["result"] = {
-                "success": False,
-                "error_code": "WORKER_POLICY_DENIED",
-                "message": "Worker execution blocked by allowlist policy.",
-                "blocked_tools": blocked_tools,
-                "blocked_connectors": blocked_connectors,
-                "allowed_tools": allowed_tools,
-                "allowed_connectors": allowed_connectors,
-                "worker_id": worker_id,
-            }
-            return {"worker_id": worker_id, "status": "failed", "error_code": "WORKER_POLICY_DENIED"}
+    blocked_tools = _list_disallowed(requested_tools, allowed_tools)
+    blocked_connectors = _list_disallowed(requested_connectors, allowed_connectors)
+    if blocked_tools or blocked_connectors:
+        with _workers_lock:
+            row = _worker_sessions.get(worker_id)
+            if row:
+                row["status"] = "failed"
+                row["updated_at"] = int(time.time() * 1000)
+                row["result"] = {
+                    "success": False,
+                    "error_code": "WORKER_POLICY_DENIED",
+                    "message": "Worker execution blocked by allowlist policy.",
+                    "blocked_tools": blocked_tools,
+                    "blocked_connectors": blocked_connectors,
+                    "allowed_tools": allowed_tools,
+                    "allowed_connectors": allowed_connectors,
+                    "worker_id": worker_id,
+                }
+        return {"worker_id": worker_id, "status": "failed", "error_code": "WORKER_POLICY_DENIED"}
 
-        namespace = str(row.get("storage_namespace") or "default")
-        run_memory = _append_worker_memory(
+    namespace = str(worker_snapshot.get("storage_namespace") or "default")
+    run_memory = _append_worker_memory(
+        worker_id=worker_id,
+        uid=uid,
+        namespace=namespace,
+        content=f"Run task: {req.task}",
+        kind="run_event",
+    )
+
+    try:
+        from hermes_bridge import create_hermes_agent, get_conversation_history
+    except Exception as exc:
+        with _workers_lock:
+            row = _worker_sessions.get(worker_id)
+            if row:
+                row["status"] = "failed"
+                row["updated_at"] = int(time.time() * 1000)
+                row["result"] = {
+                    "success": False,
+                    "error_code": "WORKER_ENGINE_UNAVAILABLE",
+                    "message": f"Hermes worker engine unavailable: {exc}",
+                    "worker_id": worker_id,
+                }
+        raise HTTPException(status_code=500, detail=f"Hermes worker engine unavailable: {exc}")
+
+    model_used = os.environ.get("NOAH_HERMES_MODEL", "google/gemma-4-31b-it")
+    provider_override, api_key_override = _resolve_provider_and_key(request, model_used)
+    worker_session_id = f"{uid}:worker:{worker_id}"
+    history = get_conversation_history(worker_session_id, limit=20)
+
+    constraints = worker_snapshot.get("constraints") or []
+    worker_skills = worker_snapshot.get("skills") or []
+    prompt = (
+        "You are a specialist worker agent for Noah.\n"
+        f"Worker name: {worker_snapshot.get('name', 'worker')}\n"
+        f"Role: {worker_snapshot.get('role', 'general')}\n"
+        f"Objective: {worker_snapshot.get('objective', '')}\n"
+        f"Personality: {worker_snapshot.get('personality', 'professional')}\n"
+        f"Instructions: {worker_snapshot.get('instructions', '')}\n"
+        f"Constraints: {json.dumps(constraints)}\n"
+        f"Skills assigned: {json.dumps(worker_skills)}\n"
+        f"Requested connectors: {json.dumps(requested_connectors)}\n"
+        f"Requested tools: {json.dumps(requested_tools)}\n"
+        f"Output format required: {req.output_format or 'summary'}\n\n"
+        "Execution requirements:\n"
+        "- Complete the task using available Hermes capabilities and tools.\n"
+        "- Do not claim execution if no concrete action was performed.\n"
+        "- Return concise but complete output with steps taken and final result.\n"
+    )
+
+    agent = create_hermes_agent(
+        system_prompt=prompt,
+        session_id=worker_session_id,
+        uid=uid,
+        model=model_used,
+        provider=provider_override,
+        api_key=api_key_override,
+    )
+    # Hard cap tool schemas sent to upstream providers (e.g. Venice max=20).
+    available_runtime_tools = list((getattr(agent, "_tools", {}) or {}).keys())
+    selected_runtime_tools = _select_runtime_tools(
+        requested_tools,
+        available_runtime_tools,
+        _WORKER_MAX_TOOLS_DEFAULT,
+    )
+    if selected_runtime_tools and getattr(agent, "_tools", None):
+        allowed_runtime = set(selected_runtime_tools)
+        agent._tools = {k: v for k, v in agent._tools.items() if k in allowed_runtime}
+    requested_tools = selected_runtime_tools or requested_tools
+
+    loop = asyncio.get_event_loop()
+    timeout_sec = max(30, int(os.environ.get("NOAH_WORKER_RUN_TIMEOUT_SEC", "240")))
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: agent.run_conversation(
+                    user_message=req.task,
+                    system_message=prompt,
+                    conversation_history=history or [],
+                ),
+            ),
+            timeout=timeout_sec,
+        )
+        final_response = (result or {}).get("final_response") or ""
+        _append_worker_memory(
             worker_id=worker_id,
             uid=uid,
             namespace=namespace,
-            content=f"Run task: {req.task}",
-            kind="run_event",
+            content=f"Run result: {final_response[:5000]}",
+            kind="run_result",
         )
-
-        row["status"] = "completed"
-        row["updated_at"] = int(time.time() * 1000)
-        row["result"] = {
-            "success": True,
-            "summary": (
-                f"Worker '{row.get('name', row.get('role', 'general'))}' completed delegated task.\n\n"
-                f"Objective: {row.get('objective', '')}\n"
-                f"Task: {req.task}\n"
-                f"Output format: {req.output_format or 'summary'}\n"
-                f"Personality: {row.get('personality', 'professional')}\n"
-                f"Skills: {', '.join(row.get('skills', [])[:12]) or 'none assigned'}\n"
-                f"Connectors: {', '.join(requested_connectors[:12]) or 'none assigned'}\n"
-                f"Tools: {', '.join(requested_tools[:12]) or 'none assigned'}\n"
-                f"Memory scope: {row.get('memory_scope', 'shared')} · Storage: {row.get('storage_namespace', 'default')}"
-            ),
-            "task": req.task,
-            "output_format": req.output_format or "summary",
-            "name": row.get("name", row.get("role", "general")),
-            "role": row.get("role", "general"),
-            "personality": row.get("personality", "professional"),
-            "constraints": row.get("constraints", []),
-            "skills": row.get("skills", []),
-            "connectors": requested_connectors,
-            "tools": requested_tools,
-            "memory_scope": row.get("memory_scope", "shared"),
-            "storage_namespace": row.get("storage_namespace", "default"),
-            "memory_record_id": run_memory.get("id"),
-            "worker_id": worker_id,
-        }
-    return {"worker_id": worker_id, "status": "completed"}
+        with _workers_lock:
+            row = _worker_sessions.get(worker_id)
+            if row:
+                row["status"] = "completed"
+                row["updated_at"] = int(time.time() * 1000)
+                row["result"] = {
+                    "success": True,
+                    "summary": final_response,
+                    "task": req.task,
+                    "output_format": req.output_format or "summary",
+                    "name": worker_snapshot.get("name", worker_snapshot.get("role", "general")),
+                    "role": worker_snapshot.get("role", "general"),
+                    "personality": worker_snapshot.get("personality", "professional"),
+                    "constraints": constraints,
+                    "skills": worker_skills,
+                    "connectors": requested_connectors,
+                    "tools": requested_tools,
+                    "memory_scope": worker_snapshot.get("memory_scope", "shared"),
+                    "storage_namespace": worker_snapshot.get("storage_namespace", "default"),
+                    "memory_record_id": run_memory.get("id"),
+                    "worker_id": worker_id,
+                }
+        return {"worker_id": worker_id, "status": "completed"}
+    except Exception as exc:
+        _append_worker_memory(
+            worker_id=worker_id,
+            uid=uid,
+            namespace=namespace,
+            content=f"Run error: {exc}",
+            kind="run_error",
+        )
+        with _workers_lock:
+            row = _worker_sessions.get(worker_id)
+            if row:
+                row["status"] = "failed"
+                row["updated_at"] = int(time.time() * 1000)
+                row["result"] = {
+                    "success": False,
+                    "error_code": "WORKER_RUN_FAILED",
+                    "message": str(exc),
+                    "task": req.task,
+                    "worker_id": worker_id,
+                }
+        return {"worker_id": worker_id, "status": "failed", "error_code": "WORKER_RUN_FAILED"}
 
 
 @router.get("/workers/{worker_id}/status")

@@ -11,10 +11,40 @@ import {
   getWorkerMemories,
   addWorkerMemory,
 } from '../services/noahApi';
-import { AiComputerIcon, Add01Icon, PlayIcon, Delete02Icon, SaveEnergy01Icon, RefreshIcon } from 'hugeicons-react';
+import {
+  AiComputerIcon,
+  Add01Icon,
+  PlayIcon,
+  Delete02Icon,
+  SaveEnergy01Icon,
+  RefreshIcon,
+  SparklesIcon,
+  Shield01Icon,
+} from 'hugeicons-react';
 
-const ROLE_OPTIONS = ['general', 'seo', 'content', 'coding', 'research', 'ops'];
-const MEMORY_OPTIONS = ['shared', 'isolated', 'none'];
+const ROLE_OPTIONS = [
+  { value: '', label: 'Select category' },
+  { value: 'general', label: 'General Assistant' },
+  { value: 'seo', label: 'SEO & Growth' },
+  { value: 'content', label: 'Content & Copywriting' },
+  { value: 'coding', label: 'Software Engineering' },
+  { value: 'research', label: 'Research Analyst' },
+  { value: 'ops', label: 'Operations' },
+  { value: 'sales', label: 'Sales & Outreach' },
+  { value: 'support', label: 'Customer Support' },
+  { value: 'design', label: 'Design & UX' },
+  { value: 'product', label: 'Product Management' },
+  { value: 'marketing', label: 'Marketing' },
+  { value: 'finance', label: 'Finance' },
+  { value: 'legal', label: 'Legal & Compliance' },
+  { value: 'hr', label: 'People & Hiring' },
+];
+
+const MEMORY_OPTIONS = [
+  { value: 'shared', label: 'Shared memory' },
+  { value: 'isolated', label: 'Isolated memory' },
+  { value: 'none', label: 'No memory' },
+];
 
 function toLines(v) {
   return (v || '').split('\n').map(s => s.trim()).filter(Boolean);
@@ -26,7 +56,7 @@ function fromList(v) {
 
 const EMPTY_FORM = {
   name: '',
-  role: 'general',
+  role: '',
   objective: '',
   personality: 'professional',
   instructions: '',
@@ -43,7 +73,7 @@ function normalizeWorker(w) {
   return {
     ...w,
     name: w?.name || 'Worker',
-    role: w?.role || 'general',
+    role: w?.role || '',
     objective: w?.objective || '',
     personality: w?.personality || 'professional',
     instructions: w?.instructions || '',
@@ -56,6 +86,10 @@ function normalizeWorker(w) {
     storage_quota_mb: Number(w?.storage_quota_mb || 256),
     status: w?.status || 'idle',
   };
+}
+
+function roleLabel(value) {
+  return ROLE_OPTIONS.find(r => r.value === value)?.label || (value || 'Uncategorized');
 }
 
 export default function WorkersTab() {
@@ -101,7 +135,7 @@ export default function WorkersTab() {
     }
     setForm({
       name: selectedWorker.name || '',
-      role: selectedWorker.role || 'general',
+      role: selectedWorker.role || '',
       objective: selectedWorker.objective || '',
       personality: selectedWorker.personality || 'professional',
       instructions: selectedWorker.instructions || '',
@@ -131,7 +165,7 @@ export default function WorkersTab() {
 
   const buildPayload = () => ({
     name: form.name.trim(),
-    role: form.role,
+    role: form.role || 'general',
     objective: form.objective.trim(),
     personality: form.personality.trim() || 'professional',
     instructions: form.instructions.trim(),
@@ -152,6 +186,7 @@ export default function WorkersTab() {
       const token = await user.getIdToken();
       const payload = buildPayload();
       if (!payload.name || !payload.objective) throw new Error('Name and objective are required.');
+      if (!form.role) throw new Error('Please select a category before creating this worker.');
       await createWorkerAgent(payload, token);
       await loadWorkers();
       setStatus('Worker created.');
@@ -237,61 +272,84 @@ export default function WorkersTab() {
   };
 
   const inputCls = 'noah-input px-3 py-2 text-xs';
+  const selectCls = `${inputCls} noah-select pr-9`;
 
   return (
     <div className="flex h-full">
-      <div className="w-[280px] border-r border-white/10 p-4 space-y-3 overflow-y-auto">
-        <div>
-          <div className="flex items-center gap-2">
-            <AiComputerIcon size={15} strokeWidth={1.9} className="text-green-400/80" />
-            <h2 className="text-sm font-semibold text-white/85">Workers</h2>
+      <div className="w-[320px] border-r border-white/10 p-4 overflow-y-auto">
+        <div className="glass-card p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AiComputerIcon size={16} strokeWidth={2} className="text-green-400/85" />
+              <h2 className="text-sm font-semibold text-white/90">Workers</h2>
+            </div>
+            <button className="btn-ghost px-2.5 py-1.5 text-[11px] flex items-center gap-1" onClick={loadWorkers}>
+              <RefreshIcon size={12} strokeWidth={1.8} />
+              Refresh
+            </button>
           </div>
-          <p className="text-[11px] mt-1 text-white/32">Create specialist workers with skills, tools, connectors, memory, and personality.</p>
+          <p className="text-[11px] mt-2 text-white/45 leading-relaxed">
+            Build specialist workers with custom skills, connectors, memory, tools, and behavior policies.
+          </p>
         </div>
 
-        <button className="btn-ghost px-2.5 py-1.5 text-[11px] flex items-center gap-1" onClick={loadWorkers}>
-          <RefreshIcon size={12} strokeWidth={1.8} />
-          Refresh
-        </button>
-
-        <div className="space-y-2">
+        <div className="mt-3 space-y-2">
           {workers.length === 0 ? (
-            <div className="glass-card p-3 text-xs text-white/40">No workers yet.</div>
+            <div className="glass-card p-3 text-xs text-white/45">No workers yet.</div>
           ) : workers.map(w => (
             <button
               key={w.worker_id}
               onClick={() => setSelectedId(w.worker_id)}
-              className={`w-full text-left glass-card p-3 ${selectedId === w.worker_id ? 'ring-1 ring-green-500/60' : ''}`}
+              className={`w-full text-left glass-card p-3 transition-all ${selectedId === w.worker_id ? 'ring-1 ring-green-500/60 bg-green-500/10' : ''}`}
             >
-              <p className="text-xs text-white/80 font-medium truncate">{w.name}</p>
-              <p className="text-[10px] text-white/45 truncate">{w.role} · {w.memory_scope}</p>
-              <p className="text-[10px] text-white/30 truncate">{w.worker_id}</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-white/85 font-medium truncate">{w.name}</p>
+                <span className="status-pill gray text-[9px] uppercase tracking-wide">{w.status}</span>
+              </div>
+              <p className="text-[10px] text-white/55 truncate mt-1">{roleLabel(w.role)}</p>
+              <p className="text-[10px] text-white/33 truncate mt-1">{w.worker_id}</p>
             </button>
           ))}
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="flex-1 overflow-y-auto p-5">
+        <div className="glass-card p-4 mb-4">
+          <div className="flex items-center gap-2 mb-1">
+            <SparklesIcon size={14} strokeWidth={1.9} className="text-green-400/85" />
+            <h3 className="text-sm font-semibold text-white/90">Worker Profile</h3>
+          </div>
+          <p className="text-[11px] text-white/45">Configure worker identity, mission, and operating policy.</p>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Worker name" className={inputCls} />
-          <select value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))} className={inputCls}>
-            {ROLE_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
+          <select value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))} className={selectCls}>
+            {ROLE_OPTIONS.map(r => <option key={r.value || 'placeholder'} value={r.value}>{r.label}</option>)}
           </select>
         </div>
 
-        <textarea value={form.objective} onChange={e => setForm(f => ({ ...f, objective: e.target.value }))} placeholder="Primary objective" className={`${inputCls} w-full resize-none`} rows={3} />
-        <textarea value={form.instructions} onChange={e => setForm(f => ({ ...f, instructions: e.target.value }))} placeholder="Custom instructions" className={`${inputCls} w-full resize-none`} rows={3} />
+        <textarea value={form.objective} onChange={e => setForm(f => ({ ...f, objective: e.target.value }))} placeholder="Primary objective" className={`${inputCls} w-full resize-none mt-3`} rows={3} />
+        <textarea value={form.instructions} onChange={e => setForm(f => ({ ...f, instructions: e.target.value }))} placeholder="Custom instructions" className={`${inputCls} w-full resize-none mt-3`} rows={3} />
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-3 mt-3">
           <input value={form.personality} onChange={e => setForm(f => ({ ...f, personality: e.target.value }))} placeholder="Personality (eg concise, strategic)" className={inputCls} />
-          <select value={form.memory_scope} onChange={e => setForm(f => ({ ...f, memory_scope: e.target.value }))} className={inputCls}>
-            {MEMORY_OPTIONS.map(m => <option key={m} value={m}>{m}</option>)}
+          <select value={form.memory_scope} onChange={e => setForm(f => ({ ...f, memory_scope: e.target.value }))} className={selectCls}>
+            {MEMORY_OPTIONS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-3 mt-3">
           <input value={form.storage_namespace} onChange={e => setForm(f => ({ ...f, storage_namespace: e.target.value }))} placeholder="Storage namespace" className={inputCls} />
           <input type="number" min={64} max={8192} value={form.storage_quota_mb} onChange={e => setForm(f => ({ ...f, storage_quota_mb: e.target.value }))} placeholder="Storage quota MB" className={inputCls} />
+        </div>
+
+        <div className="glass-card p-4 my-4">
+          <div className="flex items-center gap-2 mb-1">
+            <Shield01Icon size={14} strokeWidth={1.9} className="text-green-400/85" />
+            <h3 className="text-sm font-semibold text-white/90">Execution Scope</h3>
+          </div>
+          <p className="text-[11px] text-white/45">Assign exact skills, connectors, tools, and constraints for safe execution.</p>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
@@ -299,12 +357,12 @@ export default function WorkersTab() {
           <textarea value={form.connectorsText} onChange={e => setForm(f => ({ ...f, connectorsText: e.target.value }))} placeholder="Connectors (one per line)" className={`${inputCls} w-full resize-none`} rows={4} />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-3 mt-3">
           <textarea value={form.toolsText} onChange={e => setForm(f => ({ ...f, toolsText: e.target.value }))} placeholder="Allowed tools (one per line)" className={`${inputCls} w-full resize-none`} rows={4} />
           <textarea value={form.constraintsText} onChange={e => setForm(f => ({ ...f, constraintsText: e.target.value }))} placeholder="Constraints (one per line)" className={`${inputCls} w-full resize-none`} rows={4} />
         </div>
 
-        <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2 items-center">
+        <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2 items-center mt-4">
           <input value={runTask} onChange={e => setRunTask(e.target.value)} placeholder="Run task override (optional)" className={inputCls} />
           <button onClick={createWorker} disabled={busy} className="btn-green px-3 py-2 text-xs flex items-center gap-1">
             <Add01Icon size={12} strokeWidth={1.8} /> Create
@@ -317,22 +375,22 @@ export default function WorkersTab() {
           </button>
         </div>
 
-        <div className="flex items-center justify-between">
-          <div className="text-[11px] text-white/40">{selectedWorker ? `Selected: ${selectedWorker.name}` : 'No worker selected'}</div>
+        <div className="flex items-center justify-between mt-3">
+          <div className="text-[11px] text-white/45">{selectedWorker ? `Selected: ${selectedWorker.name}` : 'No worker selected'}</div>
           <button onClick={removeWorker} disabled={busy || !selectedWorker} className="btn-ghost px-3 py-2 text-xs text-red-300 flex items-center gap-1">
             <Delete02Icon size={12} strokeWidth={1.8} /> Delete
           </button>
         </div>
 
-        {status && <div className="text-[11px] text-green-400/85">{status}</div>}
-        {error && <div className="text-[11px] text-red-400/85">{error}</div>}
+        {status && <div className="text-[11px] text-green-400/85 mt-2">{status}</div>}
+        {error && <div className="text-[11px] text-red-400/85 mt-2">{error}</div>}
 
         {selectedWorker?.result?.summary && (
-          <div className="glass-card p-3 text-[11px] text-white/65 whitespace-pre-wrap">{selectedWorker.result.summary}</div>
+          <div className="glass-card p-3 mt-3 text-[11px] text-white/70 whitespace-pre-wrap">{selectedWorker.result.summary}</div>
         )}
 
         {selectedWorker && (
-          <div className="glass-card p-3 space-y-2">
+          <div className="glass-card p-3 mt-3 space-y-2">
             <div className="flex items-center justify-between">
               <p className="text-xs text-white/75 font-medium">Worker Memory ({selectedWorker.storage_namespace})</p>
               <button className="btn-ghost px-2 py-1 text-[10px]" onClick={() => refreshMemories(selectedWorker.worker_id)}>Refresh</button>

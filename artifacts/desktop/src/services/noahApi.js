@@ -1,5 +1,11 @@
-import { getOpenAIKey, getDeepgramKey, getOpenRouterKey, getSystemInstructions, getIntegrations } from './keys';
+import { getOpenAIKey, getDeepgramKey, getOpenRouterKey, getSystemInstructions, getIntegrations, saveAllIntegrations } from './keys';
 import { buildMemoryContext, addMemory, getAllMemories } from './memory';
+import { appendLog, createDelegatedTask, markTask } from './tasks';
+
+const BUILT_IN_GOOGLE_WORKSPACE_CLIENT_SECRET =
+  import.meta.env.VITE_GOOGLE_WORKSPACE_CLIENT_SECRET ||
+  import.meta.env.VITE_GOOGLE_CLIENT_SECRET ||
+  '';
 
 function getByokHeaders() {
   const headers = {};
@@ -72,8 +78,68 @@ function isRetryableBackendError(err) {
 }
 
 function isScreenInspectionQuestion(text = '') {
-  const value = String(text || '').toLowerCase();
+  const value = _normalizeIntentText(text);
   return /\b(screen|watch|see|visible|looking at|look at|frontmost|current window|on my screen|what do you see)\b/.test(value);
+}
+
+function _normalizeIntentText(text = '') {
+  return String(text || '')
+    .toLowerCase()
+    // normalize common Unicode dashes/slashes to ASCII-ish separators
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/[／∕]/g, '/')
+    .replace(/[`’]/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isDelegationRequest(text = '') {
+  const value = _normalizeIntentText(text);
+  const directCreatePattern =
+    /(?:\b(can you|could you|please|kindly)\b.{0,20})?\b(deploy|spawn|create|launch|start|build)\b.{0,80}\b(worker|sub[-\s_/]?agent|agent|specialist)\b/.test(value);
+  const directDelegatePattern =
+    /(?:\b(can you|could you|please|kindly)\b.{0,20})?\b(delegate|assign)\b.{0,30}\b(this|it|task|work|job|objective|request)\b.{0,20}\bto\b.{0,25}\b(worker|sub[-\s_/]?agent|agent|specialist)\b/.test(value);
+  return directCreatePattern || directDelegatePattern;
+}
+
+function isGoogleWorkspaceRequest(text = '') {
+  const value = _normalizeIntentText(text);
+  return /\b(google\s+drive|drive\s+file|google\s+doc|google\s+docs|google\s+sheet|google\s+sheets|spreadsheet|google\s+calendar|workspace)\b/.test(value);
+}
+
+function isGoogleWorkspaceDiagnosticRequest(text = '') {
+  const value = _normalizeIntentText(text);
+  return isGoogleWorkspaceRequest(value) && /\b(why|diagnos|error|permission|scope|access|not able|can't|cannot|failed|failing)\b/.test(value);
+}
+
+function inferGoogleDriveSearchQuery(text = '') {
+  const raw = String(text || '').trim();
+  const quoted = raw.match(/["“”']([^"“”']{3,})["“”']/);
+  if (quoted?.[1]) return quoted[1].trim();
+  return raw
+    .replace(/\b(can you|could you|please|find|search|look for|open|on|in|my|the|file|sheet|doc|document|google|drive|workspace|account)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160) || raw.slice(0, 160);
+}
+
+function inferDelegationRole(text = '') {
+  const value = _normalizeIntentText(text);
+  if (/\b(seo|backlink|on-page|keyword|serp)\b/.test(value)) return 'seo';
+  if (/\b(thread|content|copy|linkedin|twitter|x\b|facebook|post|viral)\b/.test(value)) return 'content';
+  if (/\b(code|coding|developer|debug|app|website|build|program)\b/.test(value)) return 'coding';
+  if (/\b(research|analy[sz]e|compare|investigate)\b/.test(value)) return 'research';
+  return 'ops';
+}
+
+function buildDelegationArgsFromTranscript(text = '') {
+  const objective = String(text || '').trim().replace(/\s+/g, ' ').slice(0, 1800);
+  return {
+    role: inferDelegationRole(objective),
+    objective,
+    constraints: [],
+    output_format: 'report',
+  };
 }
 
 function localMemoryRows() {
@@ -605,11 +671,93 @@ const BASE_TOOLS = [
   }},
   { type: 'function', function: {
     name: 'run_applescript',
-    description: 'Run AppleScript to control macOS apps. Use for: Safari/Chrome (open URLs, click), Mail, Messages, Calendar, Reminders, Notes, Finder, Spotify, Music. This lets you actually DO things in apps — fill forms, send emails, create events.',
+    description: 'Run AppleScript to control macOS apps. Use for: Safari/Chrome (open URLs, click), Messages, Calendar, Reminders, Notes, Finder, Spotify, Music. Use for Mail/Outlook only when email delivery mode is native app, not Gmail.',
     parameters: { type: 'object', properties: {
       script: { type: 'string', description: 'Valid AppleScript code' },
       reason: { type: 'string', description: 'Brief label' },
     }, required: ['script', 'reason'] },
+  }},
+  { type: 'function', function: {
+    name: 'send_gmail',
+    description: 'Send an email through the connected Google Workspace/Gmail account using the Gmail API. Use this for Gmail, Google account, Google Workspace email, or when email delivery mode is Gmail connector.',
+    parameters: { type: 'object', properties: {
+      to: { type: 'array', items: { type: 'string' }, description: 'Recipient email addresses' },
+      cc: { type: 'array', items: { type: 'string' }, description: 'Optional CC email addresses' },
+      bcc: { type: 'array', items: { type: 'string' }, description: 'Optional BCC email addresses' },
+      subject: { type: 'string' },
+      body: { type: 'string' },
+      reason: { type: 'string', description: 'Brief label' },
+    }, required: ['to', 'subject', 'body', 'reason'] },
+  }},
+  { type: 'function', function: {
+    name: 'google_drive_search',
+    description: 'Search the connected Google Drive for files by name or full text. Use this for Google Drive, Google Docs, Google Sheets, and Google Workspace file lookup.',
+    parameters: { type: 'object', properties: {
+      query: { type: 'string', description: 'Search text, file name, or phrase' },
+      mime_type: { type: 'string', description: 'Optional MIME type filter, e.g. application/vnd.google-apps.spreadsheet' },
+      limit: { type: 'integer', description: 'Max results, default 10' },
+      reason: { type: 'string' },
+    }, required: ['query', 'reason'] },
+  }},
+  { type: 'function', function: {
+    name: 'google_drive_read_file',
+    description: 'Read a connected Google Drive file. Supports Google Docs text, Google Sheets values, and exported text/CSV for common Drive files.',
+    parameters: { type: 'object', properties: {
+      file_id: { type: 'string', description: 'Google Drive file ID' },
+      range: { type: 'string', description: 'Optional Sheets A1 range, e.g. Sheet1!A1:Z100' },
+      reason: { type: 'string' },
+    }, required: ['file_id', 'reason'] },
+  }},
+  { type: 'function', function: {
+    name: 'google_sheets_get_values',
+    description: 'Read values from a connected Google Sheet by spreadsheet ID and A1 range.',
+    parameters: { type: 'object', properties: {
+      spreadsheet_id: { type: 'string' },
+      range: { type: 'string', description: 'A1 range, e.g. Sheet1!A1:Z100' },
+      reason: { type: 'string' },
+    }, required: ['spreadsheet_id', 'range', 'reason'] },
+  }},
+  { type: 'function', function: {
+    name: 'google_sheets_update_values',
+    description: 'Update values in a connected Google Sheet by spreadsheet ID and A1 range.',
+    parameters: { type: 'object', properties: {
+      spreadsheet_id: { type: 'string' },
+      range: { type: 'string', description: 'A1 range to update' },
+      values: { type: 'array', items: { type: 'array', items: {} }, description: '2D array of cell values' },
+      reason: { type: 'string' },
+    }, required: ['spreadsheet_id', 'range', 'values', 'reason'] },
+  }},
+  { type: 'function', function: {
+    name: 'google_calendar_list_events',
+    description: 'List events from the connected Google Calendar.',
+    parameters: { type: 'object', properties: {
+      calendar_id: { type: 'string', description: 'Calendar ID, default primary' },
+      time_min: { type: 'string', description: 'RFC3339 start time' },
+      time_max: { type: 'string', description: 'RFC3339 end time' },
+      query: { type: 'string', description: 'Optional event text search' },
+      reason: { type: 'string' },
+    }, required: ['reason'] },
+  }},
+  { type: 'function', function: {
+    name: 'google_calendar_create_event',
+    description: 'Create an event in the connected Google Calendar.',
+    parameters: { type: 'object', properties: {
+      calendar_id: { type: 'string', description: 'Calendar ID, default primary' },
+      summary: { type: 'string' },
+      description: { type: 'string' },
+      start: { type: 'string', description: 'RFC3339 start datetime' },
+      end: { type: 'string', description: 'RFC3339 end datetime' },
+      timezone: { type: 'string', description: 'IANA timezone, optional' },
+      attendees: { type: 'array', items: { type: 'string' }, description: 'Attendee email addresses' },
+      reason: { type: 'string' },
+    }, required: ['summary', 'start', 'end', 'reason'] },
+  }},
+  { type: 'function', function: {
+    name: 'google_workspace_diagnostics',
+    description: 'Diagnose connected Google Workspace access. Checks granted OAuth scopes and probes Drive and Calendar APIs. Use when Google Drive/Docs/Sheets/Calendar access fails or the user asks why Google access is not working.',
+    parameters: { type: 'object', properties: {
+      reason: { type: 'string' },
+    }, required: ['reason'] },
   }},
   { type: 'function', function: {
     name: 'terminal',
@@ -808,6 +956,45 @@ function appleEscape(value = '') {
 
 function shellSingleQuote(value = '') {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function base64UrlEncodeUtf8(value = '') {
+  const bytes = new TextEncoder().encode(String(value));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function encodeMailHeader(value = '') {
+  const text = String(value || '');
+  if (/^[\x20-\x7E]*$/.test(text)) return text;
+  return `=?UTF-8?B?${btoa(unescape(encodeURIComponent(text)))}?=`;
+}
+
+function buildRawEmail({ to, cc, bcc, subject, body }) {
+  const recipients = Array.isArray(to) ? to : [to];
+  const headers = [
+    `To: ${recipients.map(String).filter(Boolean).join(', ')}`,
+    cc ? `Cc: ${(Array.isArray(cc) ? cc : [cc]).map(String).filter(Boolean).join(', ')}` : '',
+    bcc ? `Bcc: ${(Array.isArray(bcc) ? bcc : [bcc]).map(String).filter(Boolean).join(', ')}` : '',
+    `Subject: ${encodeMailHeader(subject || '')}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+  ].filter(Boolean);
+  return base64UrlEncodeUtf8(`${headers.join('\r\n')}\r\n\r\n${String(body || '')}`);
+}
+
+function getEmailSendMode(integrations = null) {
+  const values = integrations || getIntegrations();
+  const configured = String(values.email_send_mode || '').trim();
+  if (configured) return configured;
+  return values.google_token ? 'gmail' : 'native';
+}
+
+function appleScriptTargetsMail(script = '') {
+  const text = String(script || '').toLowerCase();
+  return /\b(mail|apple mail|outlook|microsoft outlook)\b/.test(text) && /\b(send|compose|message|email|mail)\b/.test(text);
 }
 
 function normalizedModifiers(keys = []) {
@@ -1071,6 +1258,107 @@ const TOOL_ERROR_CODES = {
 };
 
 const SPECIALIST_ROLES = new Set(['seo', 'content', 'coding', 'research', 'ops']);
+const WORKER_ROLE_PROFILES = {
+  seo: {
+    name: 'SEO Specialist',
+    personality: 'analytical',
+    instructions:
+      'Execute end-to-end SEO work. Use tools directly, cite concrete findings, and return a practical action plan with priorities.',
+    skills: ['seo_audit', 'technical_seo', 'on_page_seo', 'keyword_research', 'backlink_analysis'],
+    output_format: 'report',
+  },
+  content: {
+    name: 'Content Specialist',
+    personality: 'editorial',
+    instructions:
+      'Produce clear, audience-aware content assets. Validate facts, keep a concise tone, and return publish-ready output.',
+    skills: ['content_strategy', 'copywriting', 'editing', 'social_content'],
+    output_format: 'report',
+  },
+  coding: {
+    name: 'Coding Specialist',
+    personality: 'engineering',
+    instructions:
+      'Solve implementation tasks with runnable steps, explicit assumptions, and verification guidance.',
+    skills: ['software_engineering', 'debugging', 'testing', 'automation'],
+    output_format: 'report',
+  },
+  research: {
+    name: 'Research Specialist',
+    personality: 'methodical',
+    instructions:
+      'Run structured research, compare options, and provide sourced, decision-ready output.',
+    skills: ['research', 'analysis', 'comparison'],
+    output_format: 'report',
+  },
+  ops: {
+    name: 'Operations Specialist',
+    personality: 'operator',
+    instructions:
+      'Drive execution with clear sequencing, risk notes, and measurable completion criteria.',
+    skills: ['operations', 'project_management', 'process_design'],
+    output_format: 'report',
+  },
+};
+
+function _normalizeList(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map((v) => String(v || '').trim()).filter(Boolean);
+}
+
+const WORKER_MAX_TOOLS = 20;
+const WORKER_ROLE_TOOL_HINTS = {
+  seo: ['search', 'web', 'browser', 'fetch', 'crawl', 'scrape', 'analysis', 'research', 'seo'],
+  content: ['search', 'web', 'research', 'memory', 'write', 'draft', 'social', 'thread'],
+  coding: ['terminal', 'shell', 'file', 'read', 'write', 'code', 'repo', 'git', 'test'],
+  research: ['search', 'web', 'fetch', 'browser', 'analysis', 'compare', 'memory'],
+  ops: ['terminal', 'shell', 'file', 'search', 'web', 'cron', 'automation', 'memory'],
+};
+
+function _rankWorkerTools(role, tools = []) {
+  const hints = WORKER_ROLE_TOOL_HINTS[role] || WORKER_ROLE_TOOL_HINTS.ops;
+  const scored = tools.map((tool, idx) => {
+    const t = String(tool || '').toLowerCase();
+    let score = 0;
+    for (const hint of hints) {
+      if (t.includes(hint)) score += 2;
+    }
+    if (/\b(read|write|file|terminal|shell|search|web|memory|fetch)\b/.test(t)) score += 1;
+    return { tool, idx, score };
+  });
+  scored.sort((a, b) => (b.score - a.score) || (a.idx - b.idx));
+  return scored.map((x) => x.tool);
+}
+
+function _buildWorkerPayload(role, args, caps) {
+  const profile = WORKER_ROLE_PROFILES[role] || WORKER_ROLE_PROFILES.ops;
+  const capabilityTools = _normalizeList(caps?.capabilities?.tools?.all);
+  const requestedTools = _normalizeList(args?.tools);
+  const requestedSkills = _normalizeList(args?.skills);
+  const requestedConnectors = _normalizeList(args?.connectors);
+  const requestedConstraints = _normalizeList(args?.constraints);
+  const workerObjective = String(args?.objective || '').trim() || `Complete ${role} specialist objective`;
+  const toolUniverse = requestedTools.length ? requestedTools : _rankWorkerTools(role, capabilityTools);
+  const toolSet = Array.from(new Set(toolUniverse)).slice(0, WORKER_MAX_TOOLS);
+
+  return {
+    name: String(args?.worker_name || '').trim() || profile.name,
+    role,
+    objective: workerObjective,
+    personality: String(args?.personality || '').trim() || profile.personality,
+    instructions:
+      String(args?.worker_instructions || '').trim() ||
+      `${profile.instructions}\nAlways execute concrete actions before claiming completion.`,
+    constraints: requestedConstraints,
+    skills: requestedSkills.length ? requestedSkills : profile.skills,
+    connectors: requestedConnectors,
+    tools: toolSet,
+    memory_scope: String(args?.memory_scope || '').trim() || 'shared',
+    storage_namespace: String(args?.storage_namespace || '').trim() || `auto_${role}`,
+    storage_quota_mb: Number(args?.storage_quota_mb || 512),
+    tool_policy: {},
+  };
+}
 
 function normalizeToolResult(result, { plane = 'device', fallbackAttempted = false, nextAction = '' } = {}) {
   const isObj = !!result && typeof result === 'object' && !Array.isArray(result);
@@ -1296,7 +1584,7 @@ async function runVirtualDelegation(args = {}, token = null) {
   const role = String(args.role || '').trim().toLowerCase();
   const objective = String(args.objective || '').trim();
   const outputFormat = String(args.output_format || 'summary').trim();
-  const constraints = Array.isArray(args.constraints) ? args.constraints.map(String) : [];
+  const constraints = _normalizeList(args.constraints);
   if (!SPECIALIST_ROLES.has(role)) {
     return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, `Unknown specialist role '${role}'.`, {
       plane: 'server',
@@ -1306,6 +1594,161 @@ async function runVirtualDelegation(args = {}, token = null) {
   }
   const caps = await getCapabilitiesFromBackend(token);
   const workerAvailable = !!caps?.capabilities?.delegation?.worker_available;
+  const taskTitle = objective || `Delegated ${role} task`;
+  const task = createDelegatedTask({
+    title: taskTitle,
+    description: constraints.length ? constraints.join(' | ') : `Specialist role: ${role}`,
+    role,
+    source: 'assistant',
+  });
+
+  if (!workerAvailable || !token) {
+    const reason = !token
+      ? 'Authentication required to create and run delegated workers.'
+      : 'Worker runtime is disabled on backend.';
+    markTask(task?.id, { status: 'failed', description: reason });
+    appendLog({
+      type: 'worker',
+      source: 'assistant',
+      status: 'failed',
+      message: `Delegation failed (${role})`,
+      detail: reason,
+      role,
+      taskId: task?.id || '',
+    });
+    return {
+      ...failureEnvelope(!token ? TOOL_ERROR_CODES.CLOUD_AUTH_MISSING : TOOL_ERROR_CODES.UNKNOWN, reason, {
+        plane: 'server',
+        recoverable: true,
+        nextAction: !token ? 'Sign in and retry.' : 'Enable NOAH_WORKER_AGENTS_ENABLED=true on backend and retry.',
+      }),
+      task_id: task?.id || '',
+      role,
+    };
+  }
+
+  let workerId = '';
+  let workerRun = null;
+  let workerStatus = null;
+  let workerResult = null;
+  try {
+    const payload = _buildWorkerPayload(role, args, caps);
+    const created = await createWorkerAgent(payload, token);
+    workerId = created?.worker_id || created?.id || '';
+    if (!workerId) {
+      throw new Error('Worker creation did not return a worker_id.');
+    }
+
+    markTask(task?.id, {
+      assignedWorker: workerId,
+      status: 'delegated',
+      description: `Worker ${payload.name} assigned for ${role} task.`,
+      meta: {
+        role,
+        skills: payload.skills,
+        connectors: payload.connectors,
+        tools_count: payload.tools.length,
+      },
+    });
+    appendLog({
+      type: 'worker',
+      source: 'assistant',
+      status: 'delegated',
+      message: `Worker spawned (${role})`,
+      detail: `${payload.name} · ${workerId}`,
+      workerId,
+      role,
+      taskId: task?.id || '',
+    });
+
+    markTask(task?.id, { status: 'active', description: 'Worker is executing delegated task.' });
+    appendLog({
+      type: 'worker',
+      source: 'assistant',
+      status: 'active',
+      message: `Worker running (${role})`,
+      detail: objective || `Complete ${role} objective`,
+      workerId,
+      role,
+      taskId: task?.id || '',
+    });
+
+    workerRun = await runWorkerAgent(workerId, {
+      task: objective || `Complete ${role} objective`,
+      output_format: outputFormat || payload.output_format || 'summary',
+      tools: payload.tools,
+      connectors: payload.connectors,
+    }, token);
+    [workerStatus, workerResult] = await Promise.all([
+      getWorkerAgentStatus(workerId, token),
+      getWorkerAgentResult(workerId, token),
+    ]);
+  } catch (err) {
+    const workerError = err?.message || 'Worker spawn/run failed';
+    markTask(task?.id, { status: 'failed', assignedWorker: workerId, description: workerError });
+    appendLog({
+      type: 'worker',
+      source: 'assistant',
+      status: 'failed',
+      message: `Worker failed (${role})`,
+      detail: workerError,
+      workerId,
+      role,
+      taskId: task?.id || '',
+    });
+    return {
+      ...failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, workerError, {
+        plane: 'server',
+        recoverable: true,
+        nextAction: 'Retry with tighter constraints or inspect worker logs.',
+      }),
+      worker_id: workerId,
+      task_id: task?.id || '',
+      role,
+    };
+  }
+
+  const statusRaw = String(workerStatus?.status || workerRun?.status || '').toLowerCase();
+  const resultSuccess = workerResult?.result?.success !== false;
+  const finalStatus = (statusRaw === 'completed' || (resultSuccess && statusRaw !== 'failed')) ? 'completed' : 'failed';
+  const summary =
+    String(workerResult?.result?.summary || workerResult?.result?.message || '').trim() ||
+    (finalStatus === 'completed' ? 'Worker completed delegated task.' : 'Worker run failed.');
+
+  markTask(task?.id, {
+    status: finalStatus,
+    assignedWorker: workerId,
+    description: summary.slice(0, 400),
+    meta: {
+      role,
+      worker_status: workerStatus?.status || workerRun?.status || '',
+      output_format: outputFormat,
+    },
+  });
+  appendLog({
+    type: 'worker',
+    source: 'assistant',
+    status: finalStatus,
+    message: `Worker ${finalStatus} (${role})`,
+    detail: summary.slice(0, 500),
+    workerId,
+    role,
+    taskId: task?.id || '',
+  });
+
+  if (finalStatus !== 'completed') {
+    return {
+      ...failureEnvelope(
+        TOOL_ERROR_CODES.UNKNOWN,
+        summary,
+        { plane: 'server', recoverable: true, nextAction: 'Inspect worker result and rerun with refined objective.' },
+      ),
+      worker_id: workerId,
+      task_id: task?.id || '',
+      role,
+    };
+  }
+
   return {
     success: true,
     plane: 'server',
@@ -1313,10 +1756,363 @@ async function runVirtualDelegation(args = {}, token = null) {
     objective,
     constraints,
     output_format: outputFormat,
-    note: `Delegated to ${role} specialist planner. Execute this workstream now and return merged output with provenance.`,
+    note: `Delegated to worker ${workerId}. Task lifecycle is tracked in Workers and Tasks modules.`,
     provenance: [{ role, status: 'planned', objective, constraints }],
     worker_available: workerAvailable,
+    worker_id: workerId,
+    worker_run: workerRun,
+    worker_status: workerStatus,
+    worker_result: workerResult,
+    task_id: task?.id || '',
+    summary,
   };
+}
+
+async function sendGmail(args = {}) {
+  const integrations = await getFreshIntegrations();
+  const googleToken = String(integrations.google_token || '').trim();
+  if (!googleToken) {
+    return failureEnvelope(TOOL_ERROR_CODES.CLOUD_AUTH_MISSING, 'Google Workspace is not connected. Connect Google in Settings > Connectors first.', {
+      plane: 'device',
+      recoverable: true,
+      nextAction: 'Connect Google Workspace and retry.',
+    });
+  }
+
+  const recipients = Array.isArray(args.to) ? args.to.map(String).map(s => s.trim()).filter(Boolean) : [String(args.to || '').trim()].filter(Boolean);
+  if (!recipients.length) {
+    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, 'send_gmail requires at least one recipient.', {
+      plane: 'device',
+      recoverable: true,
+    });
+  }
+
+  const raw = buildRawEmail({
+    to: recipients,
+    cc: args.cc,
+    bcc: args.bcc,
+    subject: args.subject || '',
+    body: args.body || '',
+  });
+
+  const result = await window.electronAPI.httpApiCall({
+    method: 'POST',
+    url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+    headers: {
+      Authorization: `Bearer ${googleToken}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: { raw },
+  });
+
+  if (!result?.success || result.statusCode >= 400) {
+    const detail = typeof result?.data === 'string'
+      ? result.data
+      : result?.data?.error?.message || result?.error || `Gmail API failed (${result?.statusCode || 'unknown'})`;
+    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, detail, {
+      plane: 'device',
+      recoverable: true,
+      nextAction: 'Verify Gmail scope is granted, then reconnect Google Workspace if needed.',
+    });
+  }
+
+  return {
+    success: true,
+    provider: 'gmail',
+    message_id: result.data?.id || '',
+    thread_id: result.data?.threadId || '',
+    to: recipients,
+  };
+}
+
+async function googleWorkspaceRequest({ method = 'GET', url, body = null }) {
+  const integrations = await getFreshIntegrations();
+  const googleToken = String(integrations.google_token || '').trim();
+  if (!googleToken) {
+    return failureEnvelope(TOOL_ERROR_CODES.CLOUD_AUTH_MISSING, 'Google Workspace is not connected. Connect Google in Settings > Connectors first.', {
+      plane: 'device',
+      recoverable: true,
+      nextAction: 'Connect Google Workspace and retry.',
+    });
+  }
+
+  const result = await window.electronAPI.httpApiCall({
+    method,
+    url,
+    headers: {
+      Authorization: `Bearer ${googleToken}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body,
+  });
+
+  if (!result?.success || result.statusCode >= 400) {
+    const detail = typeof result?.data === 'string'
+      ? result.data
+      : result?.data?.error?.message || result?.error || `Google API failed (${result?.statusCode || 'unknown'})`;
+    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, detail, {
+      plane: 'device',
+      recoverable: true,
+      nextAction: 'If this is a permission/scope error, reconnect Google Workspace so Drive, Docs, Sheets, and Calendar scopes are granted.',
+    });
+  }
+
+  return { success: true, data: result.data, statusCode: result.statusCode };
+}
+
+function googleDriveQueryEscape(value = '') {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function googleDriveSearch(args = {}) {
+  const query = String(args.query || '').trim();
+  if (!query) {
+    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, 'google_drive_search requires query.', { plane: 'device', recoverable: true });
+  }
+  const limit = Math.max(1, Math.min(50, Number(args.limit || 10)));
+  const clauses = [
+    'trashed = false',
+    `(name contains '${googleDriveQueryEscape(query)}' or fullText contains '${googleDriveQueryEscape(query)}')`,
+  ];
+  if (args.mime_type) clauses.push(`mimeType = '${googleDriveQueryEscape(args.mime_type)}'`);
+  const params = new URLSearchParams({
+    q: clauses.join(' and '),
+    pageSize: String(limit),
+    fields: 'files(id,name,mimeType,webViewLink,modifiedTime,owners(displayName,emailAddress))',
+    includeItemsFromAllDrives: 'true',
+    supportsAllDrives: 'true',
+  });
+  const resp = await googleWorkspaceRequest({ url: `https://www.googleapis.com/drive/v3/files?${params}` });
+  if (!resp.success) return resp;
+  return { success: true, files: resp.data?.files || [] };
+}
+
+function extractGoogleDocText(document = {}) {
+  const chunks = [];
+  const walk = (node) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (node.textRun?.content) chunks.push(node.textRun.content);
+    if (node.paragraph?.elements) walk(node.paragraph.elements);
+    if (node.table?.tableRows) walk(node.table.tableRows);
+    if (node.tableCells) walk(node.tableCells);
+    if (node.content) walk(node.content);
+  };
+  walk(document.body?.content || []);
+  return chunks.join('');
+}
+
+async function googleSheetsGetValues(args = {}) {
+  const spreadsheetId = String(args.spreadsheet_id || args.file_id || '').trim();
+  const range = String(args.range || 'A1:Z100').trim();
+  if (!spreadsheetId) {
+    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, 'google_sheets_get_values requires spreadsheet_id.', { plane: 'device', recoverable: true });
+  }
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`;
+  const resp = await googleWorkspaceRequest({ url });
+  if (!resp.success) return resp;
+  return { success: true, spreadsheet_id: spreadsheetId, range: resp.data?.range || range, values: resp.data?.values || [] };
+}
+
+async function googleSheetsUpdateValues(args = {}) {
+  const spreadsheetId = String(args.spreadsheet_id || '').trim();
+  const range = String(args.range || '').trim();
+  const values = Array.isArray(args.values) ? args.values : [];
+  if (!spreadsheetId || !range || !values.length) {
+    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, 'google_sheets_update_values requires spreadsheet_id, range, and values.', { plane: 'device', recoverable: true });
+  }
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const resp = await googleWorkspaceRequest({ method: 'PUT', url, body: { values } });
+  if (!resp.success) return resp;
+  return { success: true, updated: resp.data };
+}
+
+async function googleDriveReadFile(args = {}) {
+  const fileId = String(args.file_id || '').trim();
+  if (!fileId) {
+    return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, 'google_drive_read_file requires file_id.', { plane: 'device', recoverable: true });
+  }
+  const metaResp = await googleWorkspaceRequest({
+    url: `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,webViewLink&supportsAllDrives=true`,
+  });
+  if (!metaResp.success) return metaResp;
+  const file = metaResp.data || {};
+
+  if (file.mimeType === 'application/vnd.google-apps.document') {
+    const docResp = await googleWorkspaceRequest({ url: `https://docs.googleapis.com/v1/documents/${encodeURIComponent(fileId)}` });
+    if (!docResp.success) return docResp;
+    return { success: true, file, text: extractGoogleDocText(docResp.data), document: docResp.data };
+  }
+
+  if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
+    const values = await googleSheetsGetValues({ spreadsheet_id: fileId, range: args.range || 'A1:Z100' });
+    return { ...values, file };
+  }
+
+  const exportMime = file.mimeType === 'application/vnd.google-apps.presentation' ? 'text/plain' : 'text/plain';
+  const exportResp = await googleWorkspaceRequest({
+    url: `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(exportMime)}`,
+  });
+  if (!exportResp.success) return exportResp;
+  return { success: true, file, content: exportResp.data };
+}
+
+async function googleCalendarListEvents(args = {}) {
+  const calendarId = String(args.calendar_id || 'primary').trim();
+  const params = new URLSearchParams({
+    singleEvents: 'true',
+    orderBy: 'startTime',
+    maxResults: String(Math.max(1, Math.min(50, Number(args.limit || 10)))),
+  });
+  if (args.time_min) params.set('timeMin', String(args.time_min));
+  if (args.time_max) params.set('timeMax', String(args.time_max));
+  if (args.query) params.set('q', String(args.query));
+  const resp = await googleWorkspaceRequest({ url: `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${params}` });
+  if (!resp.success) return resp;
+  return { success: true, events: resp.data?.items || [] };
+}
+
+async function googleCalendarCreateEvent(args = {}) {
+  const calendarId = String(args.calendar_id || 'primary').trim();
+  const event = {
+    summary: args.summary || '',
+    description: args.description || '',
+    start: { dateTime: args.start, ...(args.timezone ? { timeZone: args.timezone } : {}) },
+    end: { dateTime: args.end, ...(args.timezone ? { timeZone: args.timezone } : {}) },
+  };
+  if (Array.isArray(args.attendees) && args.attendees.length) {
+    event.attendees = args.attendees.map(email => ({ email: String(email).trim() })).filter(a => a.email);
+  }
+  const resp = await googleWorkspaceRequest({
+    method: 'POST',
+    url: `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
+    body: event,
+  });
+  if (!resp.success) return resp;
+  return { success: true, event: resp.data };
+}
+
+async function googleWorkspaceDiagnostics() {
+  const integrations = await getFreshIntegrations();
+  const googleToken = String(integrations.google_token || '').trim();
+  if (!googleToken) {
+    return failureEnvelope(TOOL_ERROR_CODES.CLOUD_AUTH_MISSING, 'Google Workspace is not connected. Connect Google in Settings > Connectors first.', {
+      plane: 'device',
+      recoverable: true,
+      nextAction: 'Connect Google Workspace and retry.',
+    });
+  }
+
+  const tokenInfo = await window.electronAPI.httpApiCall({
+    method: 'GET',
+    url: `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(googleToken)}`,
+    headers: { Accept: 'application/json' },
+  });
+  const scopes = String(tokenInfo?.data?.scope || '').split(/\s+/).filter(Boolean);
+  const hasScope = (needle) => scopes.some(scope => scope === needle || scope.endsWith(`/${needle}`));
+
+  const driveProbe = await googleWorkspaceRequest({
+    url: 'https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true',
+  });
+  const calendarProbe = await googleWorkspaceRequest({
+    url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=1',
+  });
+
+  return {
+    success: true,
+    token_info_ok: !!(tokenInfo?.success && tokenInfo.statusCode < 400),
+    granted_scopes: scopes,
+    expected_scopes: {
+      drive: 'https://www.googleapis.com/auth/drive',
+      docs: 'https://www.googleapis.com/auth/documents',
+      sheets: 'https://www.googleapis.com/auth/spreadsheets',
+      calendar: 'https://www.googleapis.com/auth/calendar',
+      gmail: 'https://www.googleapis.com/auth/gmail.modify',
+    },
+    scope_status: {
+      drive: hasScope('drive'),
+      docs: hasScope('documents'),
+      sheets: hasScope('spreadsheets'),
+      calendar: hasScope('calendar'),
+      gmail: hasScope('gmail.modify'),
+    },
+    probes: {
+      drive: driveProbe.success ? { ok: true } : { ok: false, error: driveProbe.error, next_action: driveProbe.next_action },
+      calendar: calendarProbe.success ? { ok: true } : { ok: false, error: calendarProbe.error, next_action: calendarProbe.next_action },
+    },
+    likely_fix: 'If Drive/Docs/Sheets/Calendar scopes are false or probes return insufficient permissions, reconnect Google Workspace. If probes say the API is disabled, enable that API in Google Cloud for the OAuth project, then reconnect.',
+  };
+}
+
+function formatDelegationResultText(delegated = {}, fallback = 'Delegated task completed.') {
+  const summary = String(delegated.summary || delegated.note || fallback).trim() || fallback;
+  const workerId = delegated.worker_id ? `Worker ID: ${delegated.worker_id}` : '';
+  const taskId = delegated.task_id ? `Task ID: ${delegated.task_id}` : '';
+  return cleanAssistantOutput([summary, workerId, taskId].filter(Boolean).join('\n'));
+}
+
+function formatGoogleWorkspaceResult(toolName, result, query = '') {
+  if (!result?.success) {
+    return cleanAssistantOutput([
+      `Google Workspace ${toolName.replace(/^google_/, '').replace(/_/g, ' ')} failed.`,
+      result?.error ? `Error: ${result.error}` : '',
+      result?.next_action ? `Next action: ${result.next_action}` : '',
+    ].filter(Boolean).join('\n'));
+  }
+
+  if (toolName === 'google_workspace_diagnostics') {
+    const scopeStatus = result.scope_status || {};
+    const probes = result.probes || {};
+    return cleanAssistantOutput([
+      'Google Workspace diagnostics:',
+      `Drive scope: ${scopeStatus.drive ? 'granted' : 'missing'}`,
+      `Docs scope: ${scopeStatus.docs ? 'granted' : 'missing'}`,
+      `Sheets scope: ${scopeStatus.sheets ? 'granted' : 'missing'}`,
+      `Calendar scope: ${scopeStatus.calendar ? 'granted' : 'missing'}`,
+      `Drive API probe: ${probes.drive?.ok ? 'ok' : `failed - ${probes.drive?.error || 'unknown error'}`}`,
+      `Calendar API probe: ${probes.calendar?.ok ? 'ok' : `failed - ${probes.calendar?.error || 'unknown error'}`}`,
+      result.likely_fix ? `Likely fix: ${result.likely_fix}` : '',
+    ].filter(Boolean).join('\n'));
+  }
+
+  const files = result.files || [];
+  if (toolName === 'google_drive_search') {
+    if (!files.length) {
+      return `I searched Google Drive for "${query}" and did not find a matching file visible to the connected Google account.`;
+    }
+    const lines = files.slice(0, 8).map((file, idx) => {
+      const type = String(file.mimeType || '').replace('application/vnd.google-apps.', 'Google ');
+      return `${idx + 1}. ${file.name} (${type || 'file'})${file.webViewLink ? `\n${file.webViewLink}` : ''}`;
+    });
+    return cleanAssistantOutput(`I found ${files.length} matching Google Drive file${files.length === 1 ? '' : 's'} for "${query}":\n${lines.join('\n')}`);
+  }
+
+  return cleanAssistantOutput(JSON.stringify(result, null, 2).slice(0, 3000));
+}
+
+async function handleDirectGoogleWorkspaceRequest(transcript, onAction) {
+  const diagnostic = isGoogleWorkspaceDiagnosticRequest(transcript);
+  const sheetLike = /\b(sheet|sheets|spreadsheet)\b/i.test(transcript || '');
+  const toolName = diagnostic ? 'google_workspace_diagnostics' : 'google_drive_search';
+  const query = inferGoogleDriveSearchQuery(transcript || '');
+  const args = diagnostic
+    ? { reason: 'Diagnose Google Workspace access' }
+    : {
+        query,
+        limit: 10,
+        ...(sheetLike ? { mime_type: 'application/vnd.google-apps.spreadsheet' } : {}),
+        reason: 'Search connected Google Drive directly',
+      };
+  const label = diagnostic ? 'Diagnosing Google Workspace access' : `Searching Google Drive: ${query}`;
+  onAction?.({ type: toolName, label, status: 'running', plane: 'device' });
+  const result = await executeTool(toolName, args, null);
+  onAction?.({ type: toolName, label, status: result?.success ? 'done' : 'error', result, plane: 'device' });
+  return formatGoogleWorkspaceResult(toolName, result, query);
 }
 
 async function executeTool(name, args, token = null) {
@@ -1440,7 +2236,18 @@ async function executeTool(name, args, token = null) {
         try { await window.electronAPI.runShell(`rm -f ${shellSingleQuote(tmp)}`); } catch {}
         break;
       }
-      case 'run_applescript': raw = await window.electronAPI.runApplescript(args.script); break;
+      case 'run_applescript': {
+        const integrations = getIntegrations();
+        if (getEmailSendMode(integrations) === 'gmail' && appleScriptTargetsMail(args.script || args.reason || '')) {
+          return failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, 'Email delivery mode is Gmail connector. Use send_gmail instead of Apple Mail or Outlook AppleScript.', {
+            plane: 'device',
+            recoverable: true,
+            nextAction: 'Call send_gmail with to, subject, and body.',
+          });
+        }
+        raw = await window.electronAPI.runApplescript(args.script);
+        break;
+      }
       case 'read_file':       raw = await window.electronAPI.readFile(args.path); break;
       case 'write_file':      raw = await window.electronAPI.writeFile(args.path, args.content); break;
       case 'list_directory':  raw = await window.electronAPI.listDirectory(args.path); break;
@@ -1663,6 +2470,30 @@ async function executeTool(name, args, token = null) {
       case 'delegate_task':
         raw = await runVirtualDelegation(args, token);
         break;
+      case 'send_gmail':
+        raw = await sendGmail(args);
+        break;
+      case 'google_drive_search':
+        raw = await googleDriveSearch(args);
+        break;
+      case 'google_drive_read_file':
+        raw = await googleDriveReadFile(args);
+        break;
+      case 'google_sheets_get_values':
+        raw = await googleSheetsGetValues(args);
+        break;
+      case 'google_sheets_update_values':
+        raw = await googleSheetsUpdateValues(args);
+        break;
+      case 'google_calendar_list_events':
+        raw = await googleCalendarListEvents(args);
+        break;
+      case 'google_calendar_create_event':
+        raw = await googleCalendarCreateEvent(args);
+        break;
+      case 'google_workspace_diagnostics':
+        raw = await googleWorkspaceDiagnostics(args);
+        break;
       case 'api_call':
         raw = await window.electronAPI.httpApiCall({ method: args.method, url: args.url, headers: args.headers || {}, body: args.body || null });
         break;
@@ -1735,6 +2566,7 @@ function buildSystemPrompt(hasScreen, sysInfo, integrations, capabilities = null
   const memories = buildMemoryContext();
   const executionMode = getExecutionMode();
   const isCoderMode = executionMode === 'coder_terminal_first';
+  const emailSendMode = getEmailSendMode(integrations);
 
   const nativeApps = getNativeApps();
   const nativeLines = Object.entries(nativeApps)
@@ -1748,7 +2580,7 @@ function buildSystemPrompt(hasScreen, sysInfo, integrations, capabilities = null
   if (integrations.notion_token)                 integLines.push(`- Notion: api_call to api.notion.com/v1 with "Authorization: Bearer ${integrations.notion_token}" + "Notion-Version: 2022-06-28"`);
   if (integrations.trello_key && integrations.trello_token) integLines.push(`- Trello: api.trello.com/1/... ?key=${integrations.trello_key}&token=${integrations.trello_token}`);
   if (integrations.brave_key)                    integLines.push(`- Brave Search: GET api.search.brave.com/res/v1/web/search?q=... with "X-Subscription-Token: ${integrations.brave_key}"`);
-  if (integrations.google_token)                 integLines.push(`- Google: api_call to googleapis.com with "Authorization: Bearer ${integrations.google_token}"`);
+  if (integrations.google_token)                 integLines.push(`- Google Workspace connected: use send_gmail for Gmail, google_drive_search/google_drive_read_file for Drive and Docs, google_sheets_get_values/google_sheets_update_values for Sheets, google_calendar_list_events/google_calendar_create_event for Calendar, and api_call to googleapis.com for advanced Google APIs`);
   if (integrations.linear_key)                   integLines.push(`- Linear: POST api.linear.app/graphql with "Authorization: ${integrations.linear_key}"`);
   if (integrations.airtable_key)                 integLines.push(`- Airtable: api_call to api.airtable.com/v0 with "Authorization: Bearer ${integrations.airtable_key}"`);
 
@@ -1776,9 +2608,13 @@ Execution policy:
 8. If user asks what skills are installed/available, call list_skills before answering.
 9. If user asks about capabilities, call get_capabilities and summarize concrete availability.
 10. If user asks about cron/scheduling, call cronjob with action="list" before answering, then explain what schedule actions are available.
-${isCoderMode ? `11. CODER MODE (TERMINAL-FIRST): For coding/software tasks, prioritize terminal + read_file/write_file/list_directory workflows. Treat GUI app automation as fallback only when terminal/file route is not sufficient.
-12. In coder mode, run small verification steps after edits (lint/test/build for changed scope when feasible), and report concrete outputs/errors briefly.
-13. In coder mode, prefer deterministic edits over conversational explanations.` : ''}
+11. Email delivery mode: ${emailSendMode === 'gmail' ? 'Gmail connector. For sending email, use send_gmail. Do not use Apple Mail, Outlook, browser Gmail, or Mail AppleScript unless the user explicitly asks for a native app.' : 'Native app. For sending email, use the enabled native mail app unless the user explicitly asks for Gmail/Google.'}
+12. If the user explicitly says Gmail, Google account, Google Workspace, or connected Google account for an email task, use send_gmail regardless of native app availability.
+13. For Google Drive, Docs, Sheets, or Calendar tasks, never say you lack access before trying the matching Google Workspace tool. If a Google tool returns a scope or permission error, report that exact error and ask the user to reconnect Google Workspace.
+14. If the user asks why Google Drive/Docs/Sheets/Calendar access failed, call google_workspace_diagnostics before answering and explain the concrete failing scope or API probe.
+${isCoderMode ? `15. CODER MODE (TERMINAL-FIRST): For coding/software tasks, prioritize terminal + read_file/write_file/list_directory workflows. Treat GUI app automation as fallback only when terminal/file route is not sufficient.
+16. In coder mode, run small verification steps after edits (lint/test/build for changed scope when feasible), and report concrete outputs/errors briefly.
+17. In coder mode, prefer deterministic edits over conversational explanations.` : ''}
 
 Available native apps:
 ${nativeLines.length > 0 ? nativeLines.join('\n') : '- None enabled yet'}
@@ -1792,6 +2628,39 @@ Response style:
 - Use bullets only when listing steps/options.
 - Be concise and practical; avoid robotic verbosity.
 - Only produce long detail when user explicitly asks for it.`;
+}
+
+async function getFreshIntegrations() {
+  const integrations = getIntegrations();
+  const expiresAt = Number(integrations.google_token_expires_at || 0);
+  const shouldRefreshGoogle = integrations.google_refresh_token
+    && integrations.google_client_id
+    && (!integrations.google_token || !expiresAt || Date.now() > expiresAt - 120000);
+
+  if (!shouldRefreshGoogle || typeof window === 'undefined' || !window.electronAPI?.refreshGoogleWorkspaceToken) {
+    return integrations;
+  }
+
+  try {
+    const result = await window.electronAPI.refreshGoogleWorkspaceToken({
+      clientId: integrations.google_client_id,
+      clientSecret: integrations.google_client_secret || BUILT_IN_GOOGLE_WORKSPACE_CLIENT_SECRET,
+      refreshToken: integrations.google_refresh_token,
+    });
+    if (!result?.success || !result.accessToken) return integrations;
+
+    const next = {
+      ...integrations,
+      google_token: result.accessToken,
+      google_token_expires_at: String(Date.now() + Math.max(60, Number(result.expiresIn || 3600) - 60) * 1000),
+      google_scope: result.scope || integrations.google_scope || '',
+    };
+    saveAllIntegrations(next);
+    return next;
+  } catch (e) {
+    console.warn('[Noah] Google Workspace token refresh failed:', e);
+    return integrations;
+  }
 }
 
 // ─── Output cleanup (preserve formatting while removing noisy wrappers) ──
@@ -2143,7 +3012,7 @@ export async function sendHermesQuery(transcript, screenBase64, token, onAction,
 
   const [sysInfo, integrations, capabilitySnapshot] = await Promise.all([
     getSystemInfo(),
-    Promise.resolve(getIntegrations()),
+    getFreshIntegrations(),
     getCapabilitySnapshot(token),
   ]);
   const system = buildSystemPrompt(!!screenBase64, sysInfo, integrations, capabilitySnapshot);
@@ -2427,16 +3296,37 @@ export async function getHermesSessionHistory(sessionId, token) {
 
 // history: array of { role: 'user'|'assistant', content: string } from previous turns
 export async function sendVoiceQuery(transcript, screenBase64, token, onAction, history = [], options = {}) {
+  if (!screenBase64 && isScreenInspectionQuestion(transcript)) {
+    throw new Error('Screen Watch is enabled but no screenshot was captured. Check Screen Recording permission for Noah and try again.');
+  }
+
+  if (isDelegationRequest(transcript)) {
+    if (!token) throw new Error('Sign in is required to deploy workers.');
+    const delegatedArgs = buildDelegationArgsFromTranscript(transcript);
+    onAction?.({ type: 'delegate_task', label: `Delegating to ${delegatedArgs.role} worker...`, status: 'running', plane: 'server' });
+    const delegated = await runVirtualDelegation(delegatedArgs, token);
+    if (!delegated?.success) {
+      onAction?.({ type: 'delegate_task', label: 'Worker delegation failed', status: 'error', plane: 'server' });
+      throw new Error(delegated?.error || 'Worker delegation failed.');
+    }
+    onAction?.({ type: 'delegate_task', label: 'Worker delegation completed', status: 'done', plane: 'server' });
+    return formatDelegationResultText(delegated, 'Delegated task completed.');
+  }
+
   if (screenBase64 && isScreenInspectionQuestion(transcript)) {
     try {
       onAction?.({ type: 'vision', label: 'Inspecting screen...', status: 'running', plane: 'device' });
       const result = await analyzeScreenshot(screenBase64, token, transcript);
       onAction?.({ type: 'vision', label: 'Screen inspected', status: 'done', plane: 'device' });
-      return result.insight || 'I could not read the screen clearly.';
+      return result.insight;
     } catch (err) {
       console.warn('[Noah] Direct screen inspection failed, falling back to chat path:', err.message);
       onAction?.({ type: 'vision', label: 'Screen inspection fallback', status: 'error', plane: 'device' });
     }
+  }
+
+  if (isGoogleWorkspaceRequest(transcript)) {
+    return await handleDirectGoogleWorkspaceRequest(transcript, onAction);
   }
 
   // ── Hermes brain mode: route to backend Hermes engine ──────────────────────
@@ -2457,7 +3347,7 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
 
   const [sysInfo, integrations] = await Promise.all([
     getSystemInfo(),
-    Promise.resolve(getIntegrations()),
+    getFreshIntegrations(),
   ]);
 
   const hasScreen = !!screenBase64;
@@ -2485,6 +3375,8 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
   let skillsRetry = false;  // force skill inventory tool when user explicitly asks
   let capabilityRetry = false; // force capability tool when user asks capabilities/tools
   let cronRetry = false; // force cronjob tool when user asks scheduling/cron
+  let delegateRetry = false; // force delegate_task when user asks to deploy/spawn worker
+  let googleWorkspaceRetry = false; // force Google Workspace tools instead of vague refusal
 
   while (iterations < 14) {
     iterations++;
@@ -2506,6 +3398,9 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
       const askedSkills = /skills?\s+module|what\s+skills|available\s+skills|list\s+skills/i.test(transcript || '');
       const askedCapabilities = /what\s+tools|what\s+can\s+you\s+do|capabilities|available\s+tools|toolset|get_capabilities|list\s+your\s+tools|docker\s+sandbox|terminal\s+shells?/i.test(transcript || '');
       const askedCron = /cron|cronjob|schedule|scheduled\s+tasks?|scheduler|automation/i.test(transcript || '');
+      const askedDelegation = isDelegationRequest(transcript || '');
+      const askedGoogleWorkspace = isGoogleWorkspaceRequest(transcript || '');
+      const askedGoogleDiagnostic = isGoogleWorkspaceDiagnosticRequest(transcript || '') || /technical permission error|permissions wall/i.test(responseText);
       if (askedSkills && !skillsRetry) {
         messages.push({ role: 'assistant', content: responseText });
         messages.push({
@@ -2533,6 +3428,41 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
         cronRetry = true;
         continue;
       }
+      if (askedDelegation && !delegateRetry) {
+        const forcedArgs = buildDelegationArgsFromTranscript(transcript || '');
+        messages.push({ role: 'assistant', content: responseText });
+        messages.push({
+          role: 'user',
+          content: `User explicitly asked to deploy/spawn a worker/sub-agent. You MUST call delegate_task now with these arguments: ${JSON.stringify(forcedArgs)}. Do not answer with planning text before calling the tool.`,
+        });
+        delegateRetry = true;
+        continue;
+      }
+      if (askedGoogleWorkspace && !googleWorkspaceRetry) {
+        const forcedTool = askedGoogleDiagnostic ? 'google_workspace_diagnostics' : 'google_drive_search';
+        const forcedArgs = forcedTool === 'google_workspace_diagnostics'
+          ? { reason: 'Diagnose Google Workspace Drive/Docs/Sheets/Calendar access failure' }
+          : { query: inferGoogleDriveSearchQuery(transcript || ''), limit: 10, reason: 'Find the requested Google Drive file' };
+        messages.push({ role: 'assistant', content: responseText });
+        messages.push({
+          role: 'user',
+          content: `User asked for Google Workspace access. You MUST call ${forcedTool} now with these arguments: ${JSON.stringify(forcedArgs)}. Do not claim missing access before the tool result. If the tool fails, report the exact tool error and next_action.`,
+        });
+        googleWorkspaceRetry = true;
+        continue;
+      }
+      if (askedDelegation && delegateRetry) {
+        if (!token) throw new Error('Sign in is required to deploy workers.');
+        const delegatedArgs = buildDelegationArgsFromTranscript(transcript || '');
+        onAction?.({ type: 'delegate_task', label: `Delegating to ${delegatedArgs.role} worker...`, status: 'running', plane: 'server' });
+        const delegated = await runVirtualDelegation(delegatedArgs, token);
+        if (!delegated?.success) {
+          onAction?.({ type: 'delegate_task', label: 'Worker delegation failed', status: 'error', plane: 'server' });
+          throw new Error(delegated?.error || 'Worker delegation failed.');
+        }
+        onAction?.({ type: 'delegate_task', label: 'Worker delegation completed', status: 'done', plane: 'server' });
+        return formatDelegationResultText(delegated, 'Delegated task completed.');
+      }
       if (!refusalRetry && isRefusal(responseText)) {
         // Push the refusal response then inject a correction before retrying
         messages.push({ role: 'assistant', content: responseText });
@@ -2547,6 +3477,8 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
     skillsRetry = false;
     capabilityRetry = false;
     cronRetry = false;
+    delegateRetry = false;
+    googleWorkspaceRetry = false;
 
     messages.push({ role: 'assistant', content: message.content || null, tool_calls: message.tool_calls });
 
@@ -2554,6 +3486,16 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
       const { name, arguments: argsStr } = tc.function;
       let args;
       try { args = JSON.parse(argsStr); } catch { args = {}; }
+      if (name === 'delegate_task' && !isDelegationRequest(transcript || '')) {
+        const result = failureEnvelope(TOOL_ERROR_CODES.UNKNOWN, 'Worker deployment is allowed only when explicitly requested by the user.', {
+          plane: 'server',
+          recoverable: true,
+          nextAction: 'Ask the user to explicitly request deploy/spawn/create worker.',
+        });
+        onAction?.({ type: name, label: 'Blocked implicit worker deployment', status: 'error', result });
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 10000) });
+        continue;
+      }
       const label = name === 'save_memory'
         ? `Saving: ${args.fact || 'memory'}`
         : (args.reason || args.query || args.url || name.replace(/_/g, ' '));
@@ -2561,6 +3503,17 @@ export async function sendVoiceQuery(transcript, screenBase64, token, onAction, 
       const result = await executeTool(name, args, token);
       onAction?.({ type: name, label, status: result.error ? 'error' : 'done', result });
       messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 10000) });
+      if ((name.startsWith('google_') || name === 'api_call') && result?.success === false) {
+        messages.push({
+          role: 'user',
+          content: `The Google tool failed. You MUST tell the user this exact error and next action, without vague wording: ${JSON.stringify({
+            tool: name,
+            error: result.error,
+            error_code: result.error_code,
+            next_action: result.next_action,
+          })}`,
+        });
+      }
     }
   }
   return 'Task complete.';
@@ -2777,6 +3730,14 @@ export async function analyzeScreenshot(base64Image, token, userContext = '') {
       max_tokens: 400,
     }),
   });
-  const data = await res.json();
-  return { insight: cleanAssistantOutput(data.choices?.[0]?.message?.content) || 'Could not analyze screen.' };
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data?.error?.message || data?.detail || `Vision request failed (${res.status})`;
+    throw new Error(detail);
+  }
+  const insight = cleanAssistantOutput(data?.choices?.[0]?.message?.content || '');
+  if (!insight) {
+    throw new Error('Vision returned empty response');
+  }
+  return { insight };
 }

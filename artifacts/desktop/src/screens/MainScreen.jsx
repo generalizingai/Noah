@@ -4,6 +4,8 @@ import ConversationsTab from '../components/ConversationsTab';
 import MemoriesTab from '../components/MemoriesTab';
 import SkillsTab from '../components/SkillsTab';
 import WorkersTab from '../components/WorkersTab';
+import TasksTab from '../components/TasksTab';
+import LogsTab from '../components/LogsTab';
 import SettingsTab from '../components/SettingsTab';
 import AssistantTab from '../components/AssistantTab';
 import ConnectorsTab from '../components/ConnectorsTab';
@@ -11,10 +13,11 @@ import ToolApprovalModal from '../components/ToolApprovalModal';
 import { registerApprovalRequester, unregisterApprovalRequester } from '../services/noahApi';
 import { NoahLogo } from '../App';
 import {
-  AiComputerIcon, Message01Icon, Brain01Icon, Setting06Icon, Link01Icon, FlashIcon, GearsIcon,
+  AiComputerIcon, Message01Icon, Brain01Icon, Setting06Icon, Link01Icon, FlashIcon, GearsIcon, Clock01Icon,
 } from 'hugeicons-react';
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
+const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || '');
 
 const TABS = [
   { id: 'assistant',     label: 'Assistant',     Icon: AiComputerIcon },
@@ -22,6 +25,8 @@ const TABS = [
   { id: 'memories',      label: 'Memories',      Icon: Brain01Icon },
   { id: 'skills',        label: 'Skills',        Icon: FlashIcon },
   { id: 'workers',       label: 'Workers',       Icon: GearsIcon },
+  { id: 'tasks',         label: 'Tasks',         Icon: Clock01Icon },
+  { id: 'logs',          label: 'Logs',          Icon: Message01Icon },
   { id: 'connectors',    label: 'Connectors',    Icon: Link01Icon },
   { id: 'settings',      label: 'Settings',      Icon: Setting06Icon },
 ];
@@ -84,7 +89,17 @@ export default function MainScreen() {
           WebkitAppRegion: isElectron ? 'drag' : undefined,
         }}
       >
-        <div className="px-4 py-4 flex items-center gap-2" style={{ WebkitAppRegion: isElectron ? 'drag' : undefined }}>
+        <div
+          className="flex items-center gap-2"
+          style={{
+            paddingLeft: isElectron && isMac ? 22 : 16,
+            paddingRight: 16,
+            paddingTop: isElectron && isMac ? 64 : 16,
+            paddingBottom: isElectron && isMac ? 16 : 14,
+            marginBottom: isElectron && isMac ? 14 : 8,
+            WebkitAppRegion: isElectron ? 'drag' : undefined,
+          }}
+        >
           <NoahLogo size={22} />
           <span className="text-sm font-semibold tracking-tight text-white/75">Noah</span>
         </div>
@@ -142,6 +157,14 @@ export default function MainScreen() {
 
         <div style={{ display: activeTab === 'workers' ? 'block' : 'none', height: '100%', overflow: 'hidden' }}>
           <WorkersTab />
+        </div>
+
+        <div style={{ display: activeTab === 'tasks' ? 'block' : 'none', height: '100%', overflow: 'hidden' }}>
+          <TasksTab />
+        </div>
+
+        <div style={{ display: activeTab === 'logs' ? 'block' : 'none', height: '100%', overflow: 'hidden' }}>
+          <LogsTab />
         </div>
 
         <div style={{ display: activeTab === 'connectors' ? 'block' : 'none', height: '100%', overflow: 'hidden' }}>

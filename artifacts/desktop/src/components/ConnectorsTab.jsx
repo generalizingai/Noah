@@ -43,6 +43,14 @@ const i8plas   = (slug) => `https://img.icons8.com/plasticine/100/${slug}.png`;
 // CSS filters
 const WHITE_OVERLAY = 'brightness(0) invert(1)'; // turns any icon white
 const INVERT        = 'invert(1)';                // inverts colours (dark → light)
+const BUILT_IN_GOOGLE_WORKSPACE_CLIENT_ID =
+  import.meta.env.VITE_GOOGLE_WORKSPACE_CLIENT_ID ||
+  import.meta.env.VITE_GOOGLE_CLIENT_ID ||
+  '';
+const BUILT_IN_GOOGLE_WORKSPACE_CLIENT_SECRET =
+  import.meta.env.VITE_GOOGLE_WORKSPACE_CLIENT_SECRET ||
+  import.meta.env.VITE_GOOGLE_CLIENT_SECRET ||
+  '';
 
 // ─── Connector registry ────────────────────────────────────────────────────────
 
@@ -116,8 +124,8 @@ const API_CONNECTORS = [
     logo: i8('google-logo'),
     fallback: '#4285F4',
     category: 'Productivity',
-    desc: 'Gmail, Calendar, Drive access.',
-    placeholder: 'ya29.xxxxxxxxxxxx (OAuth token)',
+    desc: 'Gmail, Calendar, Drive, Docs, and Sheets access.',
+    placeholder: 'Optional manual access token (auto-filled after connect)',
     link: 'https://console.cloud.google.com',
     linkLabel: 'Google Cloud Console →',
   },
@@ -303,12 +311,13 @@ function ApiTile({ connector, connected, onClick }) {
   );
 }
 
-function ApiExpandedForm({ connector, value, extraValue, onChange, onExtraChange, onClose }) {
+function ApiExpandedForm({ connector, value, extraValue, tokens, onChange, onExtraChange, onSetTokens, onClose }) {
   const [showKey, setShowKey] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
   const [oauthMsg, setOauthMsg] = useState('');
   const [setupBusy, setSetupBusy] = useState(false);
   const [setupMsg, setSetupMsg] = useState('');
+  const [showGoogleAdvanced, setShowGoogleAdvanced] = useState(!BUILT_IN_GOOGLE_WORKSPACE_CLIENT_ID);
 
   const runConnectorShell = async (command, timeoutMs = 12 * 60 * 1000) => {
     if (typeof window === 'undefined' || !window.electronAPI?.runShellLong) {
@@ -395,6 +404,45 @@ end tell`;
       setOauthMsg('GitHub connected. Click "Save all" to persist.');
     } catch (e) {
       setOauthMsg(e.message || 'GitHub connect failed.');
+    } finally {
+      setOauthBusy(false);
+    }
+  };
+
+  const handleGoogleWorkspaceConnect = async () => {
+    if (oauthBusy) return;
+    setOauthBusy(true);
+    setOauthMsg('');
+    try {
+      if (typeof window === 'undefined' || !window.electronAPI?.startGoogleWorkspaceAuth) {
+        throw new Error('Desktop OAuth bridge is unavailable.');
+      }
+      const clientId = (tokens.google_client_id || BUILT_IN_GOOGLE_WORKSPACE_CLIENT_ID || '').trim();
+      const clientSecret = (tokens.google_client_secret || BUILT_IN_GOOGLE_WORKSPACE_CLIENT_SECRET || '').trim();
+      if (!clientId) {
+        throw new Error('Google OAuth Client ID is not configured for this build.');
+      }
+
+      setOauthMsg('Opening Google authorization...');
+      const result = await window.electronAPI.startGoogleWorkspaceAuth({ clientId, clientSecret });
+      if (!result?.success || !result.accessToken) {
+        throw new Error(result?.error || 'Google authorization failed.');
+      }
+
+      const expiresAt = String(Date.now() + Math.max(60, Number(result.expiresIn || 3600) - 60) * 1000);
+      onSetTokens?.(prev => ({
+        ...prev,
+        google_client_id: clientId,
+        google_client_secret: clientSecret || prev.google_client_secret || '',
+        google_token: result.accessToken,
+        google_refresh_token: result.refreshToken || prev.google_refresh_token || '',
+        google_token_expires_at: expiresAt,
+        google_scope: result.scope || prev.google_scope || '',
+        email_send_mode: prev.email_send_mode || 'gmail',
+      }));
+      setOauthMsg('Google Workspace connected. Click "Save all" to persist.');
+    } catch (e) {
+      setOauthMsg(e.message || 'Google Workspace connect failed.');
     } finally {
       setOauthBusy(false);
     }
@@ -507,6 +555,80 @@ end tell`;
       <p className="text-[11px] text-white/35 mb-3">{connector.desc}</p>
 
       <div className="flex flex-col gap-2">
+        {connector.key === 'google_token' && (
+          <div className="rounded-lg p-3" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+            <p className="text-[11px] text-white/45 mb-2">
+              Noah opens Google authorization, receives the callback locally, and stores a renewable access token.
+            </p>
+            <div className="flex flex-col gap-2">
+              {BUILT_IN_GOOGLE_WORKSPACE_CLIENT_ID && BUILT_IN_GOOGLE_WORKSPACE_CLIENT_SECRET && !showGoogleAdvanced ? (
+                <p className="text-[10px] text-green-400/70">Using Noah's built-in Google OAuth client.</p>
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    value={tokens.google_client_id || ''}
+                    onChange={e => onSetTokens?.(prev => ({ ...prev, google_client_id: e.target.value }))}
+                    placeholder={BUILT_IN_GOOGLE_WORKSPACE_CLIENT_ID ? 'Custom Google OAuth Client ID' : 'Google OAuth Client ID'}
+                    className="noah-input w-full px-3 py-2 text-xs font-mono"
+                    spellCheck={false}
+                    autoFocus
+                  />
+                  <input
+                    type={showKey ? 'text' : 'password'}
+                    value={tokens.google_client_secret || ''}
+                    onChange={e => onSetTokens?.(prev => ({ ...prev, google_client_secret: e.target.value }))}
+                    placeholder="Optional custom client secret"
+                    className="noah-input w-full px-3 py-2 text-xs font-mono"
+                    spellCheck={false}
+                  />
+                </>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={handleGoogleWorkspaceConnect}
+                  disabled={oauthBusy}
+                  className="btn-green text-[11px] px-3 py-1.5 disabled:opacity-50"
+                >
+                  {oauthBusy ? 'Connecting Google...' : 'Connect Google Workspace'}
+                </button>
+                {BUILT_IN_GOOGLE_WORKSPACE_CLIENT_ID && BUILT_IN_GOOGLE_WORKSPACE_CLIENT_SECRET && (
+                  <button
+                    onClick={() => setShowGoogleAdvanced(v => !v)}
+                    className="text-[11px] px-3 py-1.5 rounded-md border border-white/15 text-white/70 hover:bg-white/5"
+                  >
+                    {showGoogleAdvanced ? 'Use built-in client' : 'Advanced'}
+                  </button>
+                )}
+                {showGoogleAdvanced && (
+                  <button
+                    onClick={() => setShowKey(v => !v)}
+                    className="text-[11px] px-3 py-1.5 rounded-md border border-white/15 text-white/70 hover:bg-white/5"
+                  >
+                    {showKey ? 'Hide secret' : 'Show secret'}
+                  </button>
+                )}
+              </div>
+              {oauthMsg ? <p className="text-[10px] text-white/45">{oauthMsg}</p> : null}
+              {tokens.google_refresh_token ? <p className="text-[10px] text-green-400/70">Refresh token saved for automatic renewal.</p> : null}
+              <label className="text-[10px] text-white/35 flex flex-col gap-1">
+                Email sending mode
+                <select
+                  value={tokens.email_send_mode || (tokens.google_token ? 'gmail' : 'native')}
+                  onChange={e => onSetTokens?.(prev => ({ ...prev, email_send_mode: e.target.value }))}
+                  className="noah-input w-full px-3 py-2 text-xs"
+                >
+                  <option value="gmail">Gmail connector</option>
+                  <option value="native">Native mail app</option>
+                </select>
+              </label>
+              <p className="text-[10px] text-white/30">
+                Desktop OAuth clients use a temporary local loopback callback automatically. No redirect URI needs to be added in Google Cloud.
+              </p>
+            </div>
+          </div>
+        )}
+
         {connector.key !== 'higgsfield_cli' && (
           <div className="relative">
             <input
@@ -516,7 +638,7 @@ end tell`;
               placeholder={connector.placeholder}
               className="noah-input w-full px-3 py-2 text-xs font-mono pr-9"
               spellCheck={false}
-              autoFocus
+              autoFocus={connector.key !== 'google_token'}
             />
             <button
               onClick={() => setShowKey(v => !v)}
@@ -826,8 +948,10 @@ export default function ConnectorsTab() {
                       connector={connector}
                       value={tokens[connector.key] || ''}
                       extraValue={connector.extra ? (tokens[connector.extra.key] || '') : undefined}
+                      tokens={tokens}
                       onChange={val => setToken(connector.key, val)}
                       onExtraChange={connector.extra ? (val => setToken(connector.extra.key, val)) : undefined}
+                      onSetTokens={setTokens}
                       onClose={() => setExpandedApi(null)}
                     />
                   );

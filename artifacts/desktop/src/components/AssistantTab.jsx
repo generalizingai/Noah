@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../services/auth';
-import { analyzeScreenshot, sendVoiceQuery, getHermesSessions, getHermesSessionHistory, getHermesBrainMode, warmupHermes } from '../services/noahApi';
+import { analyzeScreenshot, sendVoiceQuery, getHermesSessions, getHermesSessionHistory, getHermesBrainMode, warmupHermes, ensureDesktopBridge, stopDesktopBridge } from '../services/noahApi';
 import { VoiceRecorder } from '../services/voiceRecorder';
 import { speak, stopSpeaking, isTTSAvailable, onSpeakingStateChange } from '../services/tts';
 import { PTTManager, getPTTKeyLabel } from '../services/ptt';
 import { saveConversation } from '../services/conversations';
+import { trackActionTask, trackAsyncResultFromText } from '../services/tasks';
 import { NoahLogo } from '../App';
 import {
   Mic01Icon, MicOff01Icon, EyeIcon, SentIcon,
@@ -183,6 +184,11 @@ export default function AssistantTab({ messages, setMessages }) {
   const hermesWarmedRef = useRef(false);
 
   const scrollToBottom = () => bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+
+  // Keep a shared Screen Watch flag so FloatingBar and Assistant use the same behavior.
+  useEffect(() => {
+    try { localStorage.setItem('noah_screen_watch_on', screenWatchOn ? 'true' : 'false'); } catch {}
+  }, [screenWatchOn]);
 
   const addMessage = useCallback((role, content) => {
     setMessages(prev => [...prev, { role, content, time: new Date() }]);
@@ -370,6 +376,24 @@ export default function AssistantTab({ messages, setMessages }) {
     };
   }, []);
 
+  // Keep lightweight desktop bridge stream alive so bridge health is "connected"
+  // even when no active chat SSE is running.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!isElectron || !user) return;
+      try {
+        const token = await getToken();
+        if (cancelled || !token) return;
+        await ensureDesktopBridge(token);
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+      stopDesktopBridge().catch(() => {});
+    };
+  }, [user, getToken]);
+
   useEffect(() => {
     if (!isElectron) return;
     const unsub = window.electronAPI.onPTTToggle?.((active) => {
@@ -399,13 +423,17 @@ export default function AssistantTab({ messages, setMessages }) {
     try {
       setScreenCaptureStatus('capturing');
       const result = await window.electronAPI.captureScreen();
-      if (!result) {
+      const imageData =
+        typeof result === 'string'
+          ? result
+          : (result?.data || null);
+      if (!imageData) {
         console.log('[Noah] Screen capture returned null');
         setScreenCaptureStatus('error');
       } else {
         setScreenCaptureStatus('capturing');
       }
-      return result;
+      return imageData;
     } catch (err) {
       console.error('[Noah] Screen capture error:', err);
       setScreenCaptureStatus('error');
@@ -442,6 +470,36 @@ export default function AssistantTab({ messages, setMessages }) {
       }
     };
   }, [screenWatchOn]);
+
+  const toggleScreenWatch = useCallback(async () => {
+    if (screenWatchOn) {
+      setScreenWatchOn(false);
+      return;
+    }
+    if (!isElectron) {
+      setScreenWatchOn(true);
+      return;
+    }
+    try {
+      const perm = await window.electronAPI.getScreenPermission?.();
+      if (perm === 'granted') {
+        setScreenWatchOn(true);
+        return;
+      }
+      // Attempt one capture to trigger macOS permission flow (first-time prompt).
+      const firstCapture = await captureScreen();
+      if (firstCapture) {
+        watchScreenRef.current = firstCapture;
+        setScreenWatchOn(true);
+        return;
+      }
+      addMessage('assistant', 'Screen Watch needs Screen Recording permission. I opened macOS Privacy settings so you can allow Noah once.');
+      window.electronAPI.openExternal?.('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+    } catch (err) {
+      console.error('[Noah] Screen Watch permission setup failed:', err);
+      addMessage('assistant', 'I could not enable Screen Watch automatically. Please allow Screen Recording for Noah in System Settings → Privacy & Security.');
+    }
+  }, [screenWatchOn, captureScreen, addMessage]);
 
   // ── Save chat ───────────────────────────────────────────────────────────────
   const saveChat = useCallback(() => {
@@ -553,6 +611,7 @@ export default function AssistantTab({ messages, setMessages }) {
         }
         updateStreamingMessage(action.content);
       } else {
+        trackActionTask(action, 'assistant');
         setCurrentAction(action);
       }
     };
@@ -580,6 +639,7 @@ export default function AssistantTab({ messages, setMessages }) {
       } else {
         addMessage('assistant', answer);
       }
+      trackAsyncResultFromText(answer, 'assistant');
 
       console.log('[Noah] About to call speakResponse with speakerOn:', speakerOn);
       speakResponse(answer);
@@ -598,6 +658,18 @@ export default function AssistantTab({ messages, setMessages }) {
       console.log('[Noah] handleSend completed for:', text);
     }
   }, [isLoading, user, getToken, screenWatchOn, addMessage, addStreamingMessage, updateStreamingMessage, finalizeStreamingMessage, speakResponse, messages]);
+
+  // Share recent chat context for FloatingBar so voice/text paths use comparable history.
+  useEffect(() => {
+    try {
+      const recent = messages
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .filter(m => m.content && m.content !== WELCOME.content)
+        .slice(-12)
+        .map(m => ({ role: m.role, content: m.content }));
+      localStorage.setItem('noah_recent_chat_history', JSON.stringify(recent));
+    } catch {}
+  }, [messages]);
 
   // Keep the ref in sync so VoiceRecorder callbacks always call the latest version
   useEffect(() => { handleSendRef.current = handleSend; }, [handleSend]);
@@ -672,7 +744,8 @@ export default function AssistantTab({ messages, setMessages }) {
                 )}
               </p>
             </div>
-            <ScreenWatchBadge active={screenWatchOn} onClick={() => setScreenWatchOn(v => !v)} />
+            <ScreenWatchBadge active={screenWatchOn} onClick={toggleScreenWatch} />
+            
             {/* History (Combat mode only) */}
             {isHermesMode && (
               <button onClick={openHistory} className="btn-icon" title="Past conversations">

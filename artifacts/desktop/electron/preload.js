@@ -85,6 +85,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Google sign-in via system browser (avoids Electron popup restrictions)
   startGoogleAuth: (firebaseConfig) => ipcRenderer.invoke('start-google-auth', firebaseConfig),
+  startGoogleWorkspaceAuth: (payload) => ipcRenderer.invoke('start-google-workspace-auth', payload),
+  refreshGoogleWorkspaceToken: (payload) => ipcRenderer.invoke('refresh-google-workspace-token', payload),
   onGoogleAuthResult: (cb) => {
     const listener = (_, result) => cb(result);
     ipcRenderer.once('google-auth-result', listener);

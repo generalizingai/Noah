@@ -40,6 +40,7 @@ const http  = require('http');
 const https = require('https');
 const { exec } = require('child_process');
 const os   = require('os');
+const crypto = require('crypto');
 
 // ─── Auto-updater (electron-updater via GitHub Releases) ──────────────────────
 // In dev / unsigned builds this is a no-op; it activates once the app is
@@ -169,7 +170,7 @@ function createMainWindow() {
     minWidth: 720,
     minHeight: 500,
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0a0a0a',
     show: false,
     webPreferences: {
@@ -457,6 +458,208 @@ ipcMain.handle('open-path', async (_, filePath) => {
 });
 ipcMain.handle('open-settings', () => {
   if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.send('navigate', '/settings'); }
+});
+
+const GOOGLE_WORKSPACE_SCOPES = [
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/documents',
+  'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/contacts.readonly',
+];
+
+function postFormUrlEncoded(url, data, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    try {
+      const parsed = new URL(url);
+      const body = new URLSearchParams(data).toString();
+      const lib = parsed.protocol === 'https:' ? https : http;
+      const req = lib.request({
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: 'POST',
+        timeout: timeoutMs,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          'User-Agent': 'Noah-AI-Assistant/1.0',
+        },
+      }, (res) => {
+        let responseBody = '';
+        res.on('data', chunk => { if (responseBody.length < 100000) responseBody += chunk; });
+        res.on('end', () => {
+          let parsedBody = responseBody;
+          try { parsedBody = JSON.parse(responseBody); } catch {}
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, statusCode: res.statusCode, data: parsedBody });
+        });
+      });
+      req.on('error', err => resolve({ ok: false, error: err.message }));
+      req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'Request timed out' }); });
+      req.write(body);
+      req.end();
+    } catch (err) {
+      resolve({ ok: false, error: err.message });
+    }
+  });
+}
+
+function base64UrlEncode(buffer) {
+  return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+ipcMain.handle('start-google-workspace-auth', async (_, payload = {}) => {
+  const clientId = String(payload.clientId || '').trim();
+  const clientSecret = String(payload.clientSecret || '').trim();
+  if (!clientId) {
+    return { success: false, error: 'Google OAuth Client ID is required.' };
+  }
+
+  const requestedPort = Number(payload.port) || 0;
+  let redirectUri = '';
+  const state = crypto.randomBytes(24).toString('hex');
+  const codeVerifier = base64UrlEncode(crypto.randomBytes(64));
+  const codeChallenge = base64UrlEncode(crypto.createHash('sha256').update(codeVerifier).digest());
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let server = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (server) {
+        try { server.close(); } catch {}
+      }
+      resolve(result);
+    };
+
+    server = http.createServer(async (req, res) => {
+      try {
+        const reqUrl = new URL(req.url, redirectUri || 'http://127.0.0.1');
+        if (reqUrl.pathname !== '/') {
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          res.end('Not found');
+          return;
+        }
+
+        const error = reqUrl.searchParams.get('error');
+        const code = reqUrl.searchParams.get('code');
+        const returnedState = reqUrl.searchParams.get('state');
+        if (error || !code || returnedState !== state) {
+          res.writeHead(400, { 'Content-Type': 'text/html' });
+          res.end('<h2>Google Workspace authorization failed.</h2><p>You can close this window and try again in Noah.</p>');
+          finish({ success: false, error: error || 'Invalid OAuth callback.' });
+          return;
+        }
+
+        const tokenRequest = {
+          code,
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          grant_type: 'authorization_code',
+          code_verifier: codeVerifier,
+        };
+        if (clientSecret) tokenRequest.client_secret = clientSecret;
+
+        const tokenResp = await postFormUrlEncoded('https://oauth2.googleapis.com/token', tokenRequest);
+
+        if (!tokenResp.ok || !tokenResp.data?.access_token) {
+          const detail = typeof tokenResp.data === 'string'
+            ? tokenResp.data.slice(0, 500)
+            : tokenResp.data?.error_description || tokenResp.data?.error || tokenResp.error;
+          res.writeHead(500, { 'Content-Type': 'text/html' });
+          res.end(`<h2>Google Workspace authorization failed.</h2><p>Token exchange failed.</p><pre>${escapeHtml(detail || 'Google token exchange failed.')}</pre><p>You can close this window and return to Noah.</p>`);
+          finish({ success: false, error: detail || 'Google token exchange failed.' });
+          return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<h2>Google Workspace connected.</h2><p>You can close this window and return to Noah.</p>');
+        finish({
+          success: true,
+          redirectUri,
+          accessToken: tokenResp.data.access_token,
+          refreshToken: tokenResp.data.refresh_token || '',
+          expiresIn: tokenResp.data.expires_in || 3600,
+          scope: tokenResp.data.scope || GOOGLE_WORKSPACE_SCOPES.join(' '),
+          tokenType: tokenResp.data.token_type || 'Bearer',
+        });
+      } catch (err) {
+        finish({ success: false, error: err.message });
+      }
+    });
+
+    server.on('error', (err) => {
+      const hint = err.code === 'EADDRINUSE'
+        ? `Port ${requestedPort} is already in use. Close the other process or retry with a random callback port.`
+        : err.message;
+      finish({ success: false, error: hint });
+    });
+
+    server.listen(requestedPort, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : requestedPort;
+      redirectUri = `http://127.0.0.1:${port}`;
+      const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+      authUrl.searchParams.set('client_id', clientId);
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('scope', GOOGLE_WORKSPACE_SCOPES.join(' '));
+      authUrl.searchParams.set('access_type', 'offline');
+      authUrl.searchParams.set('prompt', 'consent');
+      authUrl.searchParams.set('include_granted_scopes', 'true');
+      authUrl.searchParams.set('state', state);
+      authUrl.searchParams.set('code_challenge', codeChallenge);
+      authUrl.searchParams.set('code_challenge_method', 'S256');
+      shell.openExternal(authUrl.toString());
+    });
+
+    setTimeout(() => finish({ success: false, error: 'Timed out waiting for Google authorization.' }), 5 * 60 * 1000);
+  });
+});
+
+ipcMain.handle('refresh-google-workspace-token', async (_, payload = {}) => {
+  const clientId = String(payload.clientId || '').trim();
+  const clientSecret = String(payload.clientSecret || '').trim();
+  const refreshToken = String(payload.refreshToken || '').trim();
+  if (!clientId || !refreshToken) {
+    return { success: false, error: 'Client ID and Refresh Token are required.' };
+  }
+
+  const tokenRequest = {
+    client_id: clientId,
+    refresh_token: refreshToken,
+    grant_type: 'refresh_token',
+  };
+  if (clientSecret) tokenRequest.client_secret = clientSecret;
+
+  const tokenResp = await postFormUrlEncoded('https://oauth2.googleapis.com/token', tokenRequest);
+
+  if (!tokenResp.ok || !tokenResp.data?.access_token) {
+    const detail = typeof tokenResp.data === 'string'
+      ? tokenResp.data.slice(0, 500)
+      : tokenResp.data?.error_description || tokenResp.data?.error || tokenResp.error;
+    return { success: false, error: detail || 'Google token refresh failed.' };
+  }
+
+  return {
+    success: true,
+    accessToken: tokenResp.data.access_token,
+    expiresIn: tokenResp.data.expires_in || 3600,
+    scope: tokenResp.data.scope || '',
+    tokenType: tokenResp.data.token_type || 'Bearer',
+  };
 });
 
 ipcMain.on('floating-bar-expand',   () => { if (floatingBar) floatingBar.setSize(520, 300); });

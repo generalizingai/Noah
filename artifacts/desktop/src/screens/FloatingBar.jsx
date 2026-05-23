@@ -4,6 +4,7 @@ import { sendVoiceQuery, getHermesBrainMode, warmupHermes } from '../services/no
 import { VoiceRecorder } from '../services/voiceRecorder';
 import { PTTManager, getPTTKeyLabel, getPTTKeyCode } from '../services/ptt';
 import { speak, stopSpeaking, isTTSAvailable, onSpeakingStateChange } from '../services/tts';
+import { trackActionTask, trackAsyncResultFromText } from '../services/tasks';
 import { NoahLogo } from '../App';
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
@@ -81,6 +82,9 @@ export default function FloatingBar() {
   const [inputText,  setInputText]  = useState('');
   const [isSpeakingState, setIsSpeakingState] = useState(false);
   const [activeProcess, setActiveProcess] = useState('');
+  const [screenWatchOn, setScreenWatchOn] = useState(() => {
+    try { return localStorage.getItem('noah_screen_watch_on') === 'true'; } catch { return false; }
+  });
 
   const recRef        = useRef(null);
   const pttRef        = useRef(null);
@@ -93,6 +97,36 @@ export default function FloatingBar() {
 
   const isListening    = micStatus === 'listening';
   const isTranscribing = micStatus === 'transcribing';
+
+  // Keep screen-watch flag synced with AssistantTab changes.
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key === 'noah_screen_watch_on') {
+        setScreenWatchOn(e.newValue === 'true');
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  const captureScreen = useCallback(async () => {
+    if (!isElectron || !window.electronAPI?.captureScreen) return null;
+    try {
+      const result = await window.electronAPI.captureScreen();
+      return typeof result === 'string' ? result : (result?.data || null);
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const getRecentHistory = useCallback(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('noah_recent_chat_history') || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }, []);
 
   // ── Keep a live mic stream from mount ───────────────────────────────────────
   // Acquire the mic stream once at component mount and keep it alive.
@@ -224,13 +258,15 @@ export default function FloatingBar() {
 
     try {
       const token  = user ? await getToken() : null;
-      const screen = null; // Keep voice path low-latency; no automatic screenshot capture.
+      const screen = screenWatchOn ? await captureScreen() : null;
+      const history = getRecentHistory();
       const answer = await sendVoiceQuery(
         t,
         screen,
         token,
         (action) => {
           if (!action) return;
+          trackActionTask(action, 'pill');
           if (action.type === 'hermes_token') {
             setPhase('thinking');
             setActiveProcess('Generating response…');
@@ -243,10 +279,11 @@ export default function FloatingBar() {
             setActiveProcess(action.label || '');
           }
         },
-        [],
+        history,
         { voiceMode: true }
       );
       setResponse(answer);
+      trackAsyncResultFromText(answer, 'pill');
       setPhase('response');
       setActiveProcess('');
       broadcastQA(t, answer);
@@ -266,7 +303,7 @@ export default function FloatingBar() {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [inputText, user, getToken, scheduleIdle]);
+  }, [inputText, user, getToken, scheduleIdle, screenWatchOn, captureScreen, getRecentHistory]);
 
   useEffect(() => { handleSendRef.current = handleSend; }, [handleSend]);
 
